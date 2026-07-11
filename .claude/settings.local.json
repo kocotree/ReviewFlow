@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__context7__resolve-library-id",
+      "mcp__context7__query-docs",
+      "mcp__sequential-thinking__sequentialthinking",
+      "Bash(curl -s http://localhost:8000/)",
+      "Read(//dev/**)",
+      "Bash(kill %1)",
+      "Bash(ngrok http *)",
+      "Bash(curl -s http://127.0.0.1:4040/api/tunnels)",
+      "Bash(python3 -c \"import sys,json; tunnels=json.load\\(sys.stdin\\).get\\('tunnels',[]\\); [print\\(t.get\\('public_url'\\)\\) for t in tunnels]\")",
+      "Bash(curl *)",
+      "WebFetch(domain:open.feishu.cn)",
+      "Bash(curl -s https://bubbly-probable-alarm.ngrok-free.dev/)",
+      "Bash(git init *)",
+      "Bash(git remote *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git config *)"
+    ]
+  }
+}
