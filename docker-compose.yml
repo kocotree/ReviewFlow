@@ -1,9 +1,9 @@
 version: "3.8"
 
 services:
-  rpa-score:
+  reviewflow:
     build: .
-    container_name: rpa-score
+    container_name: reviewflow
     ports:
       - "${PORT:-8000}:8000"
     env_file:
