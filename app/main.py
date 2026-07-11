@@ -2,7 +2,7 @@
 
 启动方式::
 
-    uvicorn main:app --host 0.0.0.0 --port 8000
+    uvicorn app.main:app --host 0.0.0.0 --port 8000
 """
 
 import asyncio
@@ -16,8 +16,8 @@ from fastapi.responses import Response
 from lark_oapi.core.model import RawRequest, RawResponse
 from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
 
-from config import get_config
-from orchestrator import Orchestrator
+from app.config import get_config
+from app.orchestrator import Orchestrator
 
 # 日志配置
 logging.basicConfig(
@@ -192,7 +192,7 @@ if __name__ == "__main__":
 
     cfg = get_config()
     uvicorn.run(
-        "main:app",
+        "app.main:app",
         host=cfg.host,
         port=cfg.port,
         log_level=cfg.log_level.lower(),

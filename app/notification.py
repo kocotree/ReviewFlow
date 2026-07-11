@@ -12,8 +12,8 @@ import time
 from collections import defaultdict
 from typing import Any
 
-from config import Config
-from feishu_client import FeishuClient
+from app.config import Config
+from app.feishu import FeishuClient
 
 logger = logging.getLogger(__name__)
 

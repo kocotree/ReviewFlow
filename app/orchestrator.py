@@ -16,20 +16,20 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from ai_client import AIClient, AIScoringError
-from config import Config, get_config
-from document_parser import (
+from app.ai import AIClient, AIScoringError
+from app.config import Config, get_config
+from app.parser import (
     extract_document_id,
     extract_text_from_attachment,
     truncate_content,
 )
-from feishu_client import FeishuClient
-from notification import NotificationManager
+from app.feishu import FeishuClient
+from app.notification import NotificationManager
 
 logger = logging.getLogger(__name__)
 
 
-from field_mapping import (
+from app.field_mapping import (
     FIELD_AI_SCORE,
     FIELD_AI_SCORE_DETAIL,
     FIELD_AI_SCORE_TIME,

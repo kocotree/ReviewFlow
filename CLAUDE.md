@@ -14,7 +14,7 @@ uv pip install -r requirements.txt
 cp .env.example .env
 
 # Run the server
-uvicorn main:app --host 0.0.0.0 --port 8000 --log-level info
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --log-level info
 
 # Docker
 docker-compose up -d
@@ -44,14 +44,14 @@ Feishu Bitable record changed event
 
 | Module | Role |
 |---|---|
-| `main.py` | FastAPI app, lifespan, `/webhook/event` endpoint, event deduplication |
-| `orchestrator.py` | State machine (`待评分 → 评分中 → 已通过/未通过 → loop/reject`), coordinates all steps for a single record |
-| `feishu_client.py` | All Feishu Open API calls (Bitable record CRUD, Doc raw content, IM messages, attachment download) via `lark-oapi` SDK |
-| `ai_client.py` | Multi-provider AI scoring (OpenAI, Claude, DeepSeek, Doubao), JSON parsing with fallback strategies |
-| `notification.py` | Feishu card message templates, per-record cooldown (default 60 min), per-user daily cap (default 3) |
-| `document_parser.py` | Extract text from `pdfplumber`, `python-docx`, text/MD files; parse Feishu document IDs from URLs; smart truncation (head 60% + tail 20%) |
-| `config.py` | All env vars as a `@dataclass`, `get_config()` is a cached singleton that validates required fields |
-| `field_mapping.py` | Constants mapping Feishu Bitable field names to Python identifiers — edit this to match your table schema |
+| `app/main.py` | FastAPI app, lifespan, `/webhook/event` endpoint, event deduplication |
+| `app/orchestrator.py` | State machine (`待评分 → 评分中 → 已通过/未通过 → loop/reject`), coordinates all steps for a single record |
+| `app/feishu.py` | All Feishu Open API calls (Bitable record CRUD, Doc raw content, IM messages, attachment download) via `lark-oapi` SDK |
+| `app/ai.py` | Multi-provider AI scoring (OpenAI, Claude, DeepSeek, Doubao), JSON parsing with fallback strategies |
+| `app/notification.py` | Feishu card message templates, per-record cooldown (default 60 min), per-user daily cap (default 3) |
+| `app/parser.py` | Extract text from `pdfplumber`, `python-docx`, text/MD files; parse Feishu document IDs from URLs; smart truncation (head 60% + tail 20%) |
+| `app/config.py` | All env vars as a `@dataclass`, `get_config()` is a cached singleton that validates required fields |
+| `app/field_mapping.py` | Constants mapping Feishu Bitable field names to Python identifiers — edit this to match your table schema |
 
 **Key design decisions:**
 

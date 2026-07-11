@@ -13,7 +13,7 @@ import logging
 import re
 from typing import Any
 
-from config import Config
+from app.config import Config
 
 logger = logging.getLogger(__name__)
 

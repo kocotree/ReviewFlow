@@ -25,7 +25,7 @@ from lark_oapi.api.im.v1.model.create_message_request_body import (
 )
 from lark_oapi.core.token import TokenManager
 
-from config import Config
+from app.config import Config
 
 logger = logging.getLogger(__name__)
 

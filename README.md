@@ -19,19 +19,20 @@
 
 ```
 .
-├── main.py              # FastAPI 入口 + Webhook 端点
-├── orchestrator.py      # 评分编排核心（状态机 + 内容收集 + 通知调度）
-├── feishu_client.py     # 飞书 Open API 封装（Bitable / Doc / IM）
-├── ai_client.py         # AI 评分调用（支持 DeepSeek / OpenAI / Claude / 豆包）
-├── document_parser.py   # 文档文本提取（PDF / Word / Markdown / 飞书文档链接）
-├── notification.py      # 飞书消息卡片 + 通知频率控制
-├── config.py            # 配置管理（环境变量）
-├── field_mapping.py     # 多维表格字段名映射（按需调整）
-├── requirements.txt     # Python 依赖
-├── Dockerfile           # 容器构建
-├── docker-compose.yml   # 容器部署
-├── .env.example         # 环境变量模板
-└── .python-version      # Python 版本锁定 (3.12)
+├── app/
+│   ├── main.py            # FastAPI 入口 + Webhook 端点
+│   ├── orchestrator.py    # 评分编排核心（状态机 + 内容收集 + 通知调度）
+│   ├── feishu.py          # 飞书 Open API 封装（Bitable / Doc / IM）
+│   ├── ai.py              # AI 评分调用（支持 DeepSeek / OpenAI / Claude / 豆包）
+│   ├── parser.py          # 文档文本提取（PDF / Word / Markdown / 飞书文档链接）
+│   ├── notification.py    # 飞书消息卡片 + 通知频率控制
+│   ├── config.py          # 配置管理（环境变量）
+│   └── field_mapping.py   # 多维表格字段名映射（按需调整）
+├── requirements.txt       # Python 依赖
+├── Dockerfile             # 容器构建
+├── docker-compose.yml     # 容器部署
+├── .env.example           # 环境变量模板
+└── .python-version        # Python 版本锁定 (3.12)
 ```
 
 ## 快速开始
@@ -102,7 +103,7 @@ cp .env.example .env
 
 ```bash
 source .venv/bin/activate
-uvicorn main:app --host 0.0.0.0 --port 8000 --log-level info
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --log-level info
 ```
 
 飞书要求回调地址为 HTTPS 公网地址，本地开发可使用 ngrok：
