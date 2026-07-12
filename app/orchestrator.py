@@ -178,12 +178,20 @@ class Orchestrator:
             )
             return
 
-        # 2.5 写回回声防护：被评分内容未变化，且不是用户显式改回「待评分」重触发，
-        # 判定为评分写回自身触发的事件，跳过，避免「未通过写回 → 事件 → 再评分」死循环。
-        # （事件 payload 携带全部字段且人员字段序列化不稳定，无法靠字段级 diff 可靠
+        # 2.5 写回回声防护：被评分内容（指纹）与上次处理时一致，则判定为本服务自身
+        # 写回/状态恢复触发的事件（echo），跳过，避免自触发死循环。
+        # 重评由「内容编辑」驱动——用户改了原始描述/文档/附件，指纹随之变化，自然
+        # 不被判为 echo；而单纯的状态写回（未通过写回、空内容/坏格式恢复待评分等）
+        # 指纹不变，一律跳过。
+        #
+        # 注意：这里不能对「待评分」状态开豁免。空内容/坏格式分支会把新记录留在
+        # 「待评分」，其状态写回 echo 若被豁免放行，会每 ~2s 自触发一轮无限循环
+        # （已实测）。首次处理仍会执行——首次到达时本记录尚无指纹缓存，指纹比对
+        # 不相等，不会被跳过。
+        #（事件 payload 携带全部字段且人员字段序列化不稳定，无法靠字段级 diff 可靠
         # 识别，故改用记录实际内容指纹判断。）
         content_sig = self._content_signature(fields)
-        if status != STATUS_PENDING and self._scored_sig.get(record_id) == content_sig:
+        if self._scored_sig.get(record_id) == content_sig:
             logger.info(
                 "跳过写回回声（评分内容未变化）: record=%s status=%s",
                 record_id, status,
