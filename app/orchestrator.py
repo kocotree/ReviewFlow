@@ -267,13 +267,15 @@ class Orchestrator:
 
         # 6.2 在线文档
         doc_cache_text = ""  # 用于回写文档内容缓存字段（raw_content 兜底）
-        doc_exported_pdf = False  # 文档已导出 PDF 直传 → 可让模型转写含图片内容
         doc_link = fields.get(FIELD_DOC_LINK, "") or ""
         if isinstance(doc_link, dict):
             doc_link = doc_link.get("link", "") or doc_link.get("text", "")
         if doc_link:
             doc_id = extract_document_id(doc_link)
-            doc_text, doc_exported_pdf = await self._collect_online_doc(
+            # _collect_online_doc 会在直传模式下把导出的 PDF 追加到 pdf_files（副作用），
+            # 并返回 raw_content 纯文本兜底；是否导出成功已统一由 pdf_files 反映，
+            # 故此处忽略第二个返回值（转写门控改用 has_pdf_direct）。
+            doc_text, _ = await self._collect_online_doc(
                 doc_id, fields, direct_mode, pdf_files
             )
             if doc_text:
@@ -312,6 +314,21 @@ class Orchestrator:
             image_files=image_files,
         )
 
+        # 是否有任何 PDF 直传给了模型（在线文档导出的 PDF 和/或附件转成的 PDF，
+        # 二者进入同一个 pdf_files）。用于门控「模型转写回填缓存」——只要有 PDF
+        # 直传，模型转写时看到的就是全部这些 PDF，content_text 会合并覆盖在线文档
+        # 与附件两者的内容。
+        has_pdf_direct = bool(pdf_files)
+
+        # 非直传模式（非豆包/文本模型）下的缓存兜底文本：在线文档 raw_content 与
+        # 各附件抽取的纯文本拼接，保证「同时有在线文档+附件」时缓存也结合两者。
+        fallback_cache_parts: list[str] = []
+        if doc_cache_text:
+            fallback_cache_parts.append(doc_cache_text)
+        if attachment_texts:
+            fallback_cache_parts.append("\n\n".join(attachment_texts))
+        fallback_cache_text = "\n\n".join(fallback_cache_parts)
+
         # 7. 空内容保护：无任何可评审内容时通知用户，不调用模型
         if payload.is_empty():
             logger.info("无可评审内容，跳过评分: record=%s", record_id)
@@ -334,9 +351,10 @@ class Orchestrator:
             return
 
         # 8. 调用 AI 评分
-        # 文档已 PDF 直传且缓存为空时，让模型顺带转写文档（含图片描述）回填缓存；
-        # 缓存已填则不再转写，省去修改重评轮次的额外 token。
-        need_transcribe = doc_exported_pdf and not fields.get(FIELD_DOC_CACHE)
+        # 有 PDF 直传（在线文档 / 附件，或两者）且缓存为空时，让模型顺带转写这些
+        # 文件（含图片描述）回填缓存；模型转写时看到的是全部直传 PDF，故 content_text
+        # 会结合在线文档与附件两者。缓存已填则不再转写，省去修改重评轮次的额外 token。
+        need_transcribe = has_pdf_direct and not fields.get(FIELD_DOC_CACHE)
         try:
             result = await self._ai.score(payload, transcribe=need_transcribe)
         except AIScoringError as e:
@@ -376,15 +394,16 @@ class Orchestrator:
             FIELD_SCORE_STATUS: new_status,
             FIELD_REVISION_ROUNDS: new_rounds,
         }
-        # 将文档内容缓存到辅助字段（供飞书 AI 字段使用）。
-        # 文档走了 PDF 直传时优先用模型转写 content_text（图片已转成文字描述，
-        # 不再是占位符）；否则回退 raw_content 纯文本（视觉不可用时的兜底）。
+        # 将文档内容缓存到辅助字段（供飞书 AI 字段使用），覆盖在线文档与附件两者。
+        # 有 PDF 直传时优先用模型转写 content_text（在线文档+附件合并转写，图片已转成
+        # 文字描述，不再是占位符）；否则回退到纯文本兜底（在线文档 raw_content + 附件
+        # 抽取文本拼接，视觉不可用时的兜底）。
         if not fields.get(FIELD_DOC_CACHE):
-            transcribed = result.get("content_text") if doc_exported_pdf else None
+            transcribed = result.get("content_text") if has_pdf_direct else None
             cache_text = (
                 transcribed
                 if isinstance(transcribed, str) and transcribed.strip()
-                else doc_cache_text
+                else fallback_cache_text
             )
             if cache_text:
                 update_fields[FIELD_DOC_CACHE] = truncate_content(
