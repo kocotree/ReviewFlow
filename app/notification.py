@@ -45,6 +45,10 @@ class NotificationManager:
         # {open_id: {date_str: count}}
         self._user_daily_count: dict[str, dict[str, int]] = defaultdict(dict)
 
+        # 群告警冷却记录（独立于用户通知）
+        # {record_id: 最近群告警时间戳}
+        self._group_last_notify: dict[str, float] = {}
+
     def can_notify(self, record_id: str, open_id: str) -> bool:
         """检查是否允许发送通知。
 
@@ -164,6 +168,93 @@ class NotificationManager:
                 open_id, record_id, score, detail, rounds
             )
             await self._feishu.send_card_message(admin_open_id, admin_card)
+
+        return success
+
+    async def notify_format_unsupported(
+        self,
+        open_id: str,
+        record_id: str,
+        unsupported_files: list[str],
+    ) -> bool:
+        """发送"附件格式不符"通知（跳过审核，Point 5）。
+
+        受冷却/每日上限约束，避免用户反复提交坏格式时刷屏。
+        """
+        if not self.can_notify(record_id, open_id):
+            return False
+
+        card = _build_format_unsupported_card(unsupported_files)
+        success = await self._feishu.send_card_message(open_id, card)
+
+        if success:
+            self.record_notification(record_id, open_id)
+            logger.info(
+                "发送格式不符通知: user=%s record=%s files=%s",
+                open_id, record_id, unsupported_files,
+            )
+
+        return success
+
+    async def notify_unprocessable(
+        self,
+        open_id: str,
+        record_id: str,
+        reason: str,
+    ) -> bool:
+        """发送"无可评审内容"通知（可用内容为空，跳过评分）。
+
+        典型场景：用户仅上传了图片，但当前模型不支持图片审核，且无其他
+        文本/文档可评。受冷却/每日上限约束。
+        """
+        if not self.can_notify(record_id, open_id):
+            return False
+
+        card = _build_unprocessable_card(reason)
+        success = await self._feishu.send_card_message(open_id, card)
+
+        if success:
+            self.record_notification(record_id, open_id)
+            logger.info(
+                "发送无可评审内容通知: user=%s record=%s reason=%s",
+                open_id, record_id, reason,
+            )
+
+        return success
+
+    async def notify_error_to_group(
+        self,
+        record_id: str,
+        error: str,
+        record_url: str = "",
+    ) -> bool:
+        """向告警群推送"评分异常"卡片（AI 系统性失败）。
+
+        发往 config.notification_group_chat_id（receive_id_type=chat_id）；
+        未配置群则跳过。带记录级冷却，避免同一记录反复失败时群内刷屏。
+        """
+        chat_id = self._config.notification_group_chat_id
+        if not chat_id:
+            return False
+
+        # 群告警冷却：同一记录复用用户冷却时长
+        now = time.time()
+        cooldown_seconds = self._config.notification_cooldown_minutes * 60
+        last_time = self._group_last_notify.get(record_id, 0)
+        if now - last_time < cooldown_seconds:
+            logger.info(
+                "群告警冷却中: record=%s last=%.0fs ago", record_id, now - last_time
+            )
+            return False
+
+        card = _build_error_card(record_id, error, record_url)
+        success = await self._feishu.send_card_message(
+            chat_id, card, receive_id_type="chat_id"
+        )
+
+        if success:
+            self._group_last_notify[record_id] = now
+            logger.info("发送评分异常群告警: record=%s", record_id)
 
         return success
 
@@ -322,4 +413,108 @@ def _build_admin_rejected_card(
                 },
             },
         ],
+    }
+
+
+# 允许的附件格式（用于提示用户）
+_ALLOWED_FORMATS_HINT = "docx / doc、md、pdf、图片（png/jpg/jpeg/webp）"
+
+
+def _build_format_unsupported_card(unsupported_files: list[str]) -> dict[str, Any]:
+    """构建"附件格式不符"通知卡片。"""
+    files_text = "、".join(unsupported_files) if unsupported_files else "（未知文件）"
+    return {
+        "header": {
+            "title": {
+                "tag": "plain_text",
+                "content": "⚠️ 附件格式不符，已跳过评审",
+            },
+            "template": "red",
+        },
+        "elements": [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        f"您的提交包含 **不支持的附件格式**，已跳过自动评审。\n\n"
+                        f"**不支持的文件**: {files_text}\n"
+                        f"**允许的格式**: {_ALLOWED_FORMATS_HINT}\n\n"
+                        f"请替换为受支持的格式后重新提交。"
+                    ),
+                },
+            },
+        ],
+    }
+
+
+def _build_unprocessable_card(reason: str) -> dict[str, Any]:
+    """构建"无可评审内容"通知卡片。"""
+    return {
+        "header": {
+            "title": {
+                "tag": "plain_text",
+                "content": "⚠️ 暂无可评审内容",
+            },
+            "template": "red",
+        },
+        "elements": [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        f"您的提交暂时 **无法进行自动评审**。\n\n"
+                        f"**原因**: {reason}\n\n"
+                        f"请补充文本描述或受支持的文档后重新提交。"
+                    ),
+                },
+            },
+        ],
+    }
+
+
+def _build_error_card(
+    record_id: str,
+    error: str,
+    record_url: str = "",
+) -> dict[str, Any]:
+    """构建"评分异常"群告警卡片（AI 系统性失败，需人工介入）。"""
+    elements: list[dict] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    f"一条记录 AI 自动评分 **失败**，已置为「评分异常」终止态，"
+                    f"需人工介入。\n\n"
+                    f"**记录 ID**: {record_id}\n"
+                    f"**错误信息**: {error}"
+                ),
+            },
+        },
+    ]
+
+    if record_url:
+        elements.append({
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "查看记录"},
+                    "url": record_url,
+                    "type": "primary",
+                }
+            ],
+        })
+
+    return {
+        "header": {
+            "title": {
+                "tag": "plain_text",
+                "content": "🛑 评分异常告警",
+            },
+            "template": "red",
+        },
+        "elements": elements,
     }

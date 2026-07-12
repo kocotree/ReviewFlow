@@ -1,0 +1,27 @@
+# Python 虚拟环境（macOS 本地 venv 不能用于 Linux 容器，且体积大）
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 版本控制与 IDE
+.git/
+.gitignore
+.idea/
+.vscode/
+
+# 环境变量与密钥（绝不打进镜像）
+.env
+.env.*
+!.env.example
+
+# 本地开发/工具产物
+.claude/
+tests/
+*.md
+!README.md
+
+# 系统文件
+.DS_Store

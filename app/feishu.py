@@ -7,6 +7,7 @@
 - 机器人消息发送
 """
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -19,6 +20,12 @@ from lark_oapi.api.bitable.v1 import (
     UpdateAppTableRecordRequest,
 )
 from lark_oapi.api.docx.v1 import RawContentDocumentRequest
+from lark_oapi.api.drive.v1 import (
+    CreateExportTaskRequest,
+    DownloadExportTaskRequest,
+    ExportTask,
+    GetExportTaskRequest,
+)
 from lark_oapi.api.im.v1 import CreateMessageRequest
 from lark_oapi.api.im.v1.model.create_message_request_body import (
     CreateMessageRequestBody,
@@ -28,6 +35,11 @@ from lark_oapi.core.token import TokenManager
 from app.config import Config
 
 logger = logging.getLogger(__name__)
+
+# 导出任务轮询参数
+_EXPORT_POLL_INTERVAL = 1.5   # 每次轮询间隔（秒）
+_EXPORT_POLL_MAX_TRIES = 20   # 最多轮询次数（~30s 封顶）
+_EXPORT_JOB_SUCCESS = 0       # job_status 为 0 表示导出成功
 
 
 class FeishuClient:
@@ -119,20 +131,113 @@ class FeishuClient:
 
         return resp.data.content if resp.data else None
 
+    async def export_doc_to_pdf(
+        self, doc_token: str, doc_type: str = "docx"
+    ) -> bytes | None:
+        """将飞书云文档导出为 PDF，返回 PDF 字节内容。
+
+        异步三步流程：创建导出任务 → 轮询任务状态 → 下载产物。
+        导出产物在任务完成 ~10 分钟后被删除，故完成后立即下载。
+        任一步失败（超时/权限/文档类型不支持）返回 None，由调用方回退
+        到 get_doc_raw_content 纯文本。
+
+        Args:
+            doc_token: 云文档 token（docx 文档即 document_id）。
+            doc_type: 文档类型，普通文档为 "docx"。
+
+        Returns:
+            PDF 字节内容，失败返回 None。
+        """
+        try:
+            # 1. 创建导出任务
+            create_req = CreateExportTaskRequest.builder() \
+                .request_body(
+                    ExportTask.builder()
+                    .file_extension("pdf")
+                    .token(doc_token)
+                    .type(doc_type)
+                    .build()
+                ) \
+                .build()
+            create_resp = self._client.drive.v1.export_task.create(create_req)
+            if not create_resp.success() or create_resp.data is None:
+                logger.error(
+                    "创建导出任务失败: token=%s code=%s msg=%s",
+                    doc_token, create_resp.code, create_resp.msg,
+                )
+                return None
+            ticket = create_resp.data.ticket
+            if not ticket:
+                logger.error("导出任务未返回 ticket: token=%s", doc_token)
+                return None
+
+            # 2. 轮询任务状态直到成功
+            file_token: str | None = None
+            for _ in range(_EXPORT_POLL_MAX_TRIES):
+                await asyncio.sleep(_EXPORT_POLL_INTERVAL)
+                get_req = GetExportTaskRequest.builder() \
+                    .ticket(ticket) \
+                    .token(doc_token) \
+                    .build()
+                get_resp = self._client.drive.v1.export_task.get(get_req)
+                if not get_resp.success() or get_resp.data is None:
+                    logger.error(
+                        "查询导出任务失败: token=%s code=%s msg=%s",
+                        doc_token, get_resp.code, get_resp.msg,
+                    )
+                    return None
+                result = get_resp.data.result
+                if result is None:
+                    continue
+                if result.job_status == _EXPORT_JOB_SUCCESS:
+                    file_token = result.file_token
+                    break
+                # 非 0 且非「进行中」的状态视为失败
+                if result.job_status not in (None, _EXPORT_JOB_SUCCESS):
+                    # 进行中的状态码文档未固定，这里仅在有明确错误信息时判失败
+                    if result.job_error_msg:
+                        logger.error(
+                            "导出任务失败: token=%s status=%s msg=%s",
+                            doc_token, result.job_status, result.job_error_msg,
+                        )
+                        return None
+            if not file_token:
+                logger.warning("导出任务超时未完成: token=%s", doc_token)
+                return None
+
+            # 3. 下载导出产物
+            dl_req = DownloadExportTaskRequest.builder() \
+                .file_token(file_token) \
+                .build()
+            dl_resp = self._client.drive.v1.export_task.download(dl_req)
+            if not dl_resp.success() or dl_resp.file is None:
+                logger.error(
+                    "下载导出文件失败: token=%s code=%s msg=%s",
+                    doc_token, dl_resp.code, dl_resp.msg,
+                )
+                return None
+            return dl_resp.file.read()
+        except Exception as e:
+            logger.error("文档导出 PDF 异常: token=%s error=%s", doc_token, e)
+            return None
+
     # ---- 消息通知 ----
 
     async def send_text_message(
-        self, open_id: str, text: str
+        self, receive_id: str, text: str, *, receive_id_type: str = "open_id"
     ) -> bool:
-        """发送文本消息给指定用户。"""
+        """发送文本消息。
+
+        receive_id_type 默认 open_id（发给个人）；传 chat_id 可发到群。
+        """
         content = json.dumps({"text": text})
         body = CreateMessageRequestBody.builder() \
-            .receive_id(open_id) \
+            .receive_id(receive_id) \
             .msg_type("text") \
             .content(content) \
             .build()
         req = CreateMessageRequest.builder() \
-            .receive_id_type("open_id") \
+            .receive_id_type(receive_id_type) \
             .request_body(body) \
             .build()
         resp = self._client.im.v1.message.create(req)
@@ -143,17 +248,20 @@ class FeishuClient:
         return True
 
     async def send_card_message(
-        self, open_id: str, card_json: dict[str, Any]
+        self, receive_id: str, card_json: dict[str, Any], *, receive_id_type: str = "open_id"
     ) -> bool:
-        """发送卡片消息给指定用户。card_json 为飞书消息卡片 JSON。"""
+        """发送卡片消息。card_json 为飞书消息卡片 JSON。
+
+        receive_id_type 默认 open_id（发给个人）；传 chat_id 可发到群。
+        """
         content = json.dumps(card_json, ensure_ascii=False)
         body = CreateMessageRequestBody.builder() \
-            .receive_id(open_id) \
+            .receive_id(receive_id) \
             .msg_type("interactive") \
             .content(content) \
             .build()
         req = CreateMessageRequest.builder() \
-            .receive_id_type("open_id") \
+            .receive_id_type(receive_id_type) \
             .request_body(body) \
             .build()
         resp = self._client.im.v1.message.create(req)

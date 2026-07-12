@@ -10,18 +10,31 @@
 import io
 import logging
 import re
-from typing import Optional
+from typing import Literal
 
 logger = logging.getLogger(__name__)
 
-# 支持解析的附件 MIME 类型
+# Word (docx) 的 MIME 常量
+_MIME_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+# 支持解析为纯文本的附件 MIME 类型
 SUPPORTED_MIME_TYPES = {
     "application/pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    _MIME_DOCX,
     "text/markdown",
     "text/plain",
     "text/x-markdown",
 }
+
+# 允许直传的图片 MIME 类型（豆包稳定支持 jpeg/png/webp；gif/bmp 暂不放）
+IMAGE_MIME_TYPES = {
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+}
+
+# 附件分类结果
+AttachmentKind = Literal["pdf", "docx", "text", "image", "unsupported"]
 
 # 飞书文档链接模式
 FEISHU_DOC_PATTERNS = [
@@ -93,12 +106,52 @@ def _guess_mime_from_filename(filename: str) -> str:
     ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
     mapping = {
         "pdf": "application/pdf",
-        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "docx": _MIME_DOCX,
+        "doc": "application/msword",
         "md": "text/markdown",
         "txt": "text/plain",
         "markdown": "text/markdown",
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "webp": "image/webp",
     }
     return mapping.get(ext, "")
+
+
+def classify_attachment(mime_type: str, filename: str = "") -> AttachmentKind:
+    """将附件归类为 pdf / docx / text / image / unsupported。
+
+    用于格式白名单校验（Point 5）与按 provider 能力分流。缺失 MIME
+    时用文件名扩展名兜底。
+
+    Args:
+        mime_type: 飞书返回的 MIME 类型（可能为空）。
+        filename: 原始文件名。
+
+    Returns:
+        附件类别。docx/doc 都归为 "docx"（老 .doc 也交由后续转换/抽取处理）。
+    """
+    if not mime_type and filename:
+        mime_type = _guess_mime_from_filename(filename)
+
+    if mime_type == "application/pdf":
+        return "pdf"
+    if mime_type in (_MIME_DOCX, "application/msword"):
+        return "docx"
+    if mime_type in ("text/markdown", "text/x-markdown", "text/plain"):
+        return "text"
+    if mime_type in IMAGE_MIME_TYPES:
+        return "image"
+    return "unsupported"
+
+
+def normalize_image_mime(mime_type: str, filename: str = "") -> str:
+    """返回可直传的图片 MIME（缺失时按扩展名兜底），非图片返回空串。"""
+    if mime_type in IMAGE_MIME_TYPES:
+        return mime_type
+    guessed = _guess_mime_from_filename(filename)
+    return guessed if guessed in IMAGE_MIME_TYPES else ""
 
 
 def _extract_from_pdf(data: bytes) -> str | None:

@@ -115,9 +115,7 @@ def _build_event_handler() -> EventDispatcherHandler:
             # 异步处理
             async def safe_process(rid: str = record_id) -> None:
                 if _orchestrator:
-                    await _orchestrator.process_record(
-                        app_token, table_id, rid
-                    )
+                    await _orchestrator.process_record(app_token, table_id, rid)
 
             asyncio.create_task(safe_process())
 

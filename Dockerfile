@@ -2,9 +2,14 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# 安装系统依赖（pdfplumber 需要）
+# 安装系统依赖：
+# - libjpeg62-turbo: pdfplumber 需要
+# - libreoffice-writer: docx/doc → PDF 转换（供豆包文件模态直传）
+# - fonts-noto-cjk: 转换中文文档时避免字体缺失导致乱码/丢字
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libjpeg62-turbo \
+    libreoffice-writer \
+    fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 # 安装 Python 依赖

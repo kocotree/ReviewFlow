@@ -30,6 +30,10 @@ class Config:
     bitable_table_id: str = field(
         default_factory=lambda: os.getenv("BITABLE_TABLE_ID", "")
     )
+    # 飞书租户域名（用于拼接记录跳转链接），形如 https://xxx.feishu.cn
+    feishu_base_url: str = field(
+        default_factory=lambda: os.getenv("FEISHU_BASE_URL", "")
+    )
 
     # ---- Webhook 安全 ----
     webhook_verification_token: str = field(
@@ -67,6 +71,10 @@ class Config:
     )
     max_daily_notifications_per_user: int = field(
         default_factory=lambda: int(os.getenv("MAX_DAILY_NOTIFICATIONS_PER_USER", "3"))
+    )
+    # 异常/告警通知群的 chat_id（形如 oc_xxx）；为空则不向群推送。
+    notification_group_chat_id: str = field(
+        default_factory=lambda: os.getenv("NOTIFICATION_GROUP_CHAT_ID", "")
     )
 
     # ---- 服务配置 ----
