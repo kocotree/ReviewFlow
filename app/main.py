@@ -26,6 +26,31 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+class _HealthCheckLogFilter(logging.Filter):
+    """过滤掉健康检查（GET /）的成功访问日志，仅保留错误。
+
+    Docker/compose 的 healthcheck 每 ~30s 打一次 `GET /`，成功时刷屏无意义；
+    这里只丢弃状态码 < 400 的健康检查访问日志，出错（4xx/5xx）仍照常打印。
+    uvicorn.access 的日志 args 为 (client_addr, method, full_path, http_version, status)。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 5:
+            method, path, status = args[1], args[2], args[4]
+            try:
+                ok = int(status) < 400
+            except (TypeError, ValueError):
+                ok = False
+            if method == "GET" and path == "/" and ok:
+                return False
+        return True
+
+
+# 挂到 uvicorn 访问日志 logger 上（应用被 uvicorn 导入时生效）
+logging.getLogger("uvicorn.access").addFilter(_HealthCheckLogFilter())
+
 # ---- 全局编排器 ----
 _orchestrator: Orchestrator | None = None
 
