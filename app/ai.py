@@ -133,11 +133,14 @@ SCORING_SYSTEM_PROMPT = """\
 3. 顶档（各维度最高一档）只授予确有过硬证据、达专业交付水准者；有任何可扣之处，一律不进顶档。
 4. 四个维度得分之和即为 score，必须与 dimensions 完全一致，且不得超过已触发的硬性上限。
 5. 在 detail 中先逐条列出主要扣分点（对应上面的扣分账），再给出具体、可执行的改进建议。
+6. 无论最终分数高低（哪怕已达专业交付水准），都要在 highlights 中点出确实值得肯定的亮点（1-3 条，正向、具体、简短；若通篇确无亮点可留空字符串），并在 improvements 中以鼓励、建设性的口吻给出「即便本次已合格、仍可精益求精」的提升方向（2-4 条，具体、可执行）。highlights / improvements 面向「让好作品更好」，语气正向，不要照搬 detail 里的扣分表述，也不要因为要写这两项而拔高或压低 score。
 
 请严格按照以下 JSON 格式输出，不要输出任何其他内容：
 {
   "score": <整数，0-100，须等于四个维度之和，且不超过已触发的硬性上限>,
   "detail": "<详细评分说明：先逐条列扣分点，再给改进建议，不超过500字>",
+  "highlights": "<值得肯定的亮点，1-3 条，正向、具体、简短，可为空字符串，不超过150字>",
+  "improvements": "<即便已合格仍可进一步提升的方向，2-4 条，鼓励口吻、具体可执行，不超过250字>",
   "dimensions": {
     "completeness": <0-30>,
     "logic": <0-30>,
@@ -414,8 +417,11 @@ class AIClient:
         score = int(score_match.group(1)) if score_match else 0
         score = max(0, min(100, score))  # 限制在 0-100
 
-        detail_match = re.search(r'"detail"[\s:]*"([^"]*)"', text)
-        detail = detail_match.group(1) if detail_match else text[:500]
+        def _grab_str(name: str) -> str:
+            m = re.search(rf'"{name}"[\s:]*"([^"]*)"', text)
+            return m.group(1) if m else ""
+
+        detail = _grab_str("detail") or text[:500]
 
         def _grab_dim(name: str) -> int:
             m = re.search(rf'"{name}"[\s:]*(\d+)', text)
@@ -424,6 +430,10 @@ class AIClient:
         return {
             "score": score,
             "detail": detail,
+            # 正向字段（通过卡片用）：截断时尽力捞回，捞不到就退回空串，
+            # 由通知层退化为「仅展示分数」，不影响评分主流程。
+            "highlights": _grab_str("highlights"),
+            "improvements": _grab_str("improvements"),
             "dimensions": {
                 "completeness": _grab_dim("completeness"),
                 "logic": _grab_dim("logic"),

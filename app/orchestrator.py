@@ -376,6 +376,9 @@ class Orchestrator:
         score = result.get("score", 0)
         score = max(0, min(100, int(score)))
         detail = result.get("detail", "") or ""
+        # 正向反馈（仅用于「通过」通知，不落库）：即便通过也告知亮点与可提升点。
+        highlights = result.get("highlights", "") or ""
+        improvements = result.get("improvements", "") or ""
 
         # 8. 更新记录字段
         new_rounds = rounds + 1
@@ -434,6 +437,8 @@ class Orchestrator:
                     record_id=record_id,
                     score=score,
                     threshold=self._config.score_threshold,
+                    highlights=highlights,
+                    improvements=improvements,
                 )
             else:
                 await self._notifier.notify_score_failed(

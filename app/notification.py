@@ -138,9 +138,15 @@ class NotificationManager:
         record_id: str,
         score: int,
         threshold: int,
+        highlights: str = "",
+        improvements: str = "",
     ) -> bool:
-        """发送"评分通过"通知（不计入频率限制）。"""
-        card = _build_passed_card(score, threshold)
+        """发送"评分通过"通知（不计入频率限制）。
+
+        通过后仍附上 AI 给出的亮点与可提升点（若有），鼓励提交者精益求精；
+        二者皆空时退回「仅展示分数」的精简卡片。
+        """
+        card = _build_passed_card(score, threshold, highlights, improvements)
         success = await self._feishu.send_card_message(open_id, card)
         if success:
             logger.info(
@@ -325,8 +331,52 @@ def _build_failed_card(
     }
 
 
-def _build_passed_card(score: int, threshold: int) -> dict[str, Any]:
-    """构建"通过"通知卡片。"""
+def _build_passed_card(
+    score: int,
+    threshold: int,
+    highlights: str = "",
+    improvements: str = "",
+) -> dict[str, Any]:
+    """构建"通过"通知卡片。
+
+    在「恭喜 + 分数」之外，若 AI 产出了亮点/可提升点则一并展示，
+    以「锦上添花」的正向口吻引导提交者继续打磨；两者皆空时自动退回精简卡片。
+    """
+    elements: list[dict] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    f"您的提交已通过 AI 自动评审。\n"
+                    f"**评分**: {score} 分（通过线: {threshold} 分）"
+                ),
+            },
+        },
+    ]
+
+    highlights = (highlights or "").strip()
+    improvements = (improvements or "").strip()
+
+    if highlights or improvements:
+        elements.append({"tag": "hr"})
+    if highlights:
+        elements.append({
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"**✨ 做得好的地方**:\n{highlights}",
+            },
+        })
+    if improvements:
+        elements.append({
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"**🚀 还可以更好**:\n{improvements}",
+            },
+        })
+
     return {
         "header": {
             "title": {
@@ -335,18 +385,7 @@ def _build_passed_card(score: int, threshold: int) -> dict[str, Any]:
             },
             "template": "green",
         },
-        "elements": [
-            {
-                "tag": "div",
-                "text": {
-                    "tag": "lark_md",
-                    "content": (
-                        f"恭喜！您的提交已通过 AI 自动评审。\n"
-                        f"**评分**: {score} 分（通过线: {threshold} 分）"
-                    ),
-                },
-            },
-        ],
+        "elements": elements,
     }
 
 
