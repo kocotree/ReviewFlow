@@ -4,8 +4,10 @@ services:
   reviewflow:
     build: .
     container_name: reviewflow
-    ports:
-      - "${PORT:-8000}:8000"
+    # 入口改由服务器上已有的 Traefik 实例统一处理（HTTPS + 域名），
+    # 不再直接向宿主机暴露端口。如需本地/内网直连调试，取消下面注释即可：
+    # ports:
+    #   - "${PORT:-8000}:8000"
     env_file:
       - .env
     restart: unless-stopped
@@ -20,3 +22,25 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    labels:
+      # 启用 Traefik（由服务器上已有的 Traefik 实例自动发现本容器）
+      - "traefik.enable=true"
+      # HTTPS 路由器：把 example.com 换成你的域名（飞书 webhook 就配到这个域名）
+      - "traefik.http.routers.reviewflow.rule=Host(`example.com`)"
+      # entrypoint 名称须与你的 Traefik 静态配置一致（常见为 websecure / https）
+      - "traefik.http.routers.reviewflow.entrypoints=websecure"
+      # ⚠️ certresolver 必须填你的 Traefik 实例里【实际存在】的证书解析器名字，
+      #    否则路由会被静默丢弃、访问报 ERR_CONNECTION_CLOSED。
+      #    查询方法：docker inspect <traefik容器> | grep certificatesresolvers
+      #    取 --certificatesresolvers.<名字>.acme... 中的 <名字> 填在这里。
+      - "traefik.http.routers.reviewflow.tls.certresolver=letsencrypt"
+      # 后端服务端口（容器内 uvicorn 监听端口，与 Dockerfile 的 EXPOSE 8000 一致）
+      - "traefik.http.services.reviewflow.loadbalancer.server.port=8000"
+    networks:
+      # 须与 Traefik 所在的 external 网络同名，否则 Traefik 发现不到本容器
+      - traefik-network
+
+networks:
+  traefik-network:
+    # external: true 表示复用已有网络（由 Traefik 侧创建），不在此文件中新建
+    external: true

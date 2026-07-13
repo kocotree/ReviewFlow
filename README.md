@@ -216,6 +216,42 @@ docker-compose up -d
 
 `docker-compose.yml` 已配置健康检查（探测 `GET /`）、日志滚动与 `restart: unless-stopped`。运行前确保 `.env` 已就绪。
 
+### 通过 Traefik 暴露 HTTPS（生产推荐）
+
+飞书要求回调为**公网 HTTPS**。`docker-compose.yml` 已内置 Traefik 标签，由服务器上已有的 Traefik 实例自动发现本容器并完成 TLS 终止与域名路由——因此默认**不再向宿主机直接暴露端口**（`ports:` 已注释，流量只经 Traefik）。
+
+部署前需按你的环境改动以下 **3 处**（均在 compose 文件注释中标注）：
+
+| 位置 | 默认值 | 改成 |
+|---|---|---|
+| `routers.reviewflow.rule=Host(...)` | `example.com` | 你的真实域名（DNS 需先解析到本机） |
+| `routers.reviewflow.tls.certresolver` | `letsencrypt` | 你 Traefik 实例里**实际存在**的证书解析器名 |
+| `networks` / 顶层 `traefik-network` | `traefik-network` | 与 Traefik 所在 external 网络**同名** |
+
+> [!WARNING]
+> `certresolver` 必须填 Traefik 里真实存在的名字，否则路由会被**静默丢弃**、访问报 `ERR_CONNECTION_CLOSED`。
+> 查法：`docker inspect <traefik容器> | grep certificatesresolvers`，取 `--certificatesresolvers.<名字>.acme...` 里的 `<名字>`；网络名用 `docker network ls` 确认。
+
+启动并验证链路：
+
+```bash
+docker compose up -d
+curl -i https://<你的域名>/          # 返回 200 即说明 Traefik → 容器已通
+```
+
+> [!NOTE]
+> 需要本地/内网直连调试时，取消 compose 中 `ports:` 的注释即可临时把 `8000` 映射回宿主机。
+
+### 回调地址
+
+Traefik 就绪后，飞书事件订阅的**请求网址**为：
+
+```
+https://<Host() 中填的域名>/webhook/event
+```
+
+即上面配置的域名接上固定路径 `/webhook/event`（应用的 Webhook 端点，见 `app/main.py`）。把它填入[事件订阅](#5-配置飞书事件订阅)，再完成[订阅多维表格](#6-订阅多维表格必须的一步)那一步，回调才会真正开始推送。
+
 ## 通知机制
 
 | 场景 | 通知对象 | 频控 |
