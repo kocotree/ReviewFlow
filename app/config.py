@@ -44,8 +44,9 @@ class Config:
     )
 
     # ---- AI 配置 ----
+    # 当前仅支持 doubao（其余 provider 已下线）
     ai_provider: str = field(
-        default_factory=lambda: os.getenv("AI_PROVIDER", "openai")
+        default_factory=lambda: os.getenv("AI_PROVIDER", "doubao")
     )
     ai_api_key: str = field(
         default_factory=lambda: os.getenv("AI_API_KEY", "")
@@ -55,6 +56,21 @@ class Config:
     )
     ai_base_url: str = field(
         default_factory=lambda: os.getenv("AI_BASE_URL", "")
+    )
+    # 评分采样温度：默认 0，走确定性采样以最大化多次调用间的评分一致性。
+    # 值越低越稳定；如需模型稍有发挥空间可上调（一般不建议超过 0.3）。
+    ai_temperature: float = field(
+        default_factory=lambda: float(os.getenv("AI_TEMPERATURE", "0"))
+    )
+    # 评分调用的 max_tokens：评分响应仅含短 JSON（detail≤500字 + 维度分），
+    # 默认 4000 留足余量，避免 detail 偏长时被截断触发正则兜底。
+    ai_score_max_tokens: int = field(
+        default_factory=lambda: int(os.getenv("AI_SCORE_MAX_TOKENS", "4000"))
+    )
+    # 文档转写调用的 max_tokens：转写正文可能较长（限 4000 字内），默认 16000。
+    # 转写与评分已解耦，此处截断只影响缓存回填、不影响评分。
+    ai_transcribe_max_tokens: int = field(
+        default_factory=lambda: int(os.getenv("AI_TRANSCRIBE_MAX_TOKENS", "16000"))
     )
 
     # ---- 评分配置 ----
