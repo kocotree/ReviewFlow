@@ -30,6 +30,7 @@ from lark_oapi.api.im.v1 import CreateMessageRequest
 from lark_oapi.api.im.v1.model.create_message_request_body import (
     CreateMessageRequestBody,
 )
+from lark_oapi.api.wiki.v2 import GetNodeSpaceRequest
 from lark_oapi.core.token import TokenManager
 
 from app.config import Config
@@ -130,6 +131,33 @@ class FeishuClient:
             return None
 
         return resp.data.content if resp.data else None
+
+    async def get_wiki_node(self, node_token: str) -> tuple[str, str] | None:
+        """解析知识库（wiki）节点，返回挂载文档的 (obj_token, obj_type)。
+
+        wiki 链接里的 token 是知识库节点 token，并非真实文档 token；直接拿它去
+        导出 PDF 会报 1069914 file token invalid。需先经 Wiki API 解析出实际
+        挂载的文档 obj_token 与 obj_type（docx/doc/sheet/...），再用于导出/读取。
+
+        Args:
+            node_token: wiki 节点 token（来自 /wiki/<token> 链接）。
+
+        Returns:
+            (obj_token, obj_type)，解析失败返回 None（由调用方回退到原 token）。
+        """
+        req = GetNodeSpaceRequest.builder().token(node_token).build()
+        resp = self._client.wiki.v2.space.get_node(req)
+        if not resp.success() or resp.data is None or resp.data.node is None:
+            logger.error(
+                "解析 wiki 节点失败: token=%s code=%s msg=%s",
+                node_token, resp.code, resp.msg,
+            )
+            return None
+        node = resp.data.node
+        if not node.obj_token or not node.obj_type:
+            logger.error("wiki 节点缺少 obj_token/obj_type: token=%s", node_token)
+            return None
+        return node.obj_token, node.obj_type
 
     async def export_doc_to_pdf(
         self, doc_token: str, doc_type: str = "docx"

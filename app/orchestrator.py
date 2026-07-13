@@ -21,9 +21,10 @@ from app.ai import AIClient, AIScoringError, ScoringPayload, doubao_supports_fil
 from app.config import Config, get_config
 from app.parser import (
     classify_attachment,
-    extract_document_id,
+    extract_document_ref,
     extract_text_from_attachment,
     normalize_image_mime,
+    strip_image_placeholders,
     truncate_content,
 )
 from app.docx_convert import docx_to_pdf
@@ -271,12 +272,12 @@ class Orchestrator:
         if isinstance(doc_link, dict):
             doc_link = doc_link.get("link", "") or doc_link.get("text", "")
         if doc_link:
-            doc_id = extract_document_id(doc_link)
+            doc_ref = extract_document_ref(doc_link)
             # _collect_online_doc 会在直传模式下把导出的 PDF 追加到 pdf_files（副作用），
             # 并返回 raw_content 纯文本兜底；是否导出成功已统一由 pdf_files 反映，
             # 故此处忽略第二个返回值（转写门控改用 has_pdf_direct）。
             doc_text, _ = await self._collect_online_doc(
-                doc_id, fields, direct_mode, pdf_files
+                doc_ref, fields, direct_mode, pdf_files
             )
             if doc_text:
                 doc_cache_text = doc_text
@@ -315,9 +316,8 @@ class Orchestrator:
         )
 
         # 是否有任何 PDF 直传给了模型（在线文档导出的 PDF 和/或附件转成的 PDF，
-        # 二者进入同一个 pdf_files）。用于门控「模型转写回填缓存」——只要有 PDF
-        # 直传，模型转写时看到的就是全部这些 PDF，content_text 会合并覆盖在线文档
-        # 与附件两者的内容。
+        # 二者进入同一个 pdf_files）。用于门控「独立转写回填缓存」——只要有 PDF
+        # 直传，转写调用看到的就是全部这些 PDF，转写文本会合并覆盖在线文档与附件两者。
         has_pdf_direct = bool(pdf_files)
 
         # 非直传模式（非豆包/文本模型）下的缓存兜底文本：在线文档 raw_content 与
@@ -350,13 +350,9 @@ class Orchestrator:
                 )
             return
 
-        # 8. 调用 AI 评分
-        # 有 PDF 直传（在线文档 / 附件，或两者）且缓存为空时，让模型顺带转写这些
-        # 文件（含图片描述）回填缓存；模型转写时看到的是全部直传 PDF，故 content_text
-        # 会结合在线文档与附件两者。缓存已填则不再转写，省去修改重评轮次的额外 token。
-        need_transcribe = has_pdf_direct and not fields.get(FIELD_DOC_CACHE)
+        # 8. 调用 AI 评分（评分与文档转写已拆分为两次独立调用，见下方步骤 8b）
         try:
-            result = await self._ai.score(payload, transcribe=need_transcribe)
+            result = await self._ai.score(payload)
         except AIScoringError as e:
             # 置为「评分异常」终止态（不在 TRIGGERABLE_STATUSES 中），避免恢复
             # 成可触发状态后被写回事件反复重新触发，形成死循环。
@@ -394,12 +390,22 @@ class Orchestrator:
             FIELD_SCORE_STATUS: new_status,
             FIELD_REVISION_ROUNDS: new_rounds,
         }
-        # 将文档内容缓存到辅助字段（供飞书 AI 字段使用），覆盖在线文档与附件两者。
-        # 有 PDF 直传时优先用模型转写 content_text（在线文档+附件合并转写，图片已转成
-        # 文字描述，不再是占位符）；否则回退到纯文本兜底（在线文档 raw_content + 附件
-        # 抽取文本拼接，视觉不可用时的兜底）。
+        # 8b. 将文档内容缓存到辅助字段（供飞书 AI 字段使用），覆盖在线文档与附件两者。
+        # 有 PDF 直传且缓存为空时，用独立的转写调用把这些文件（含图片描述）转成文字
+        # 回填缓存（在线文档+附件合并转写）；转写与评分完全解耦，转写失败或截断都不
+        # 影响上面已完成的评分。无 PDF 直传或转写不可用时，回退到纯文本兜底
+        # （在线文档 raw_content + 附件抽取文本拼接）。缓存已填则不再转写，省下 token。
         if not fields.get(FIELD_DOC_CACHE):
-            transcribed = result.get("content_text") if has_pdf_direct else None
+            transcribed: str | None = None
+            if has_pdf_direct:
+                try:
+                    transcribed = await self._ai.transcribe(payload)
+                except AIScoringError as e:
+                    # 转写是尽力而为的缓存回填，失败不阻断评分流程
+                    logger.warning(
+                        "文档转写失败，回退纯文本兜底: record=%s error=%s",
+                        record_id, e,
+                    )
             cache_text = (
                 transcribed
                 if isinstance(transcribed, str) and transcribed.strip()
@@ -448,7 +454,7 @@ class Orchestrator:
 
     async def _collect_online_doc(
         self,
-        doc_id: str | None,
+        doc_ref: tuple[str | None, str],
         fields: dict[str, Any],
         direct_mode: bool,
         pdf_files: list[tuple[bytes, str]],
@@ -458,26 +464,48 @@ class Orchestrator:
         direct_mode（豆包直传）下优先导出为 PDF 直传（内嵌图可被模型看到）；
         导出失败或非直传模式回退到 raw_content 纯文本，再回退到缓存字段。
 
+        wiki 链接的 token 是知识库节点 token，需先解析出挂载文档的真实
+        obj_token/obj_type，否则导出会报 file token invalid。
+
+        返回的纯文本已清洗掉 raw_content 里的裸图片占位符（image.png 之类）——
+        它们只是抽取接口的产物，既非用户真实内容、又会被评分模型误判为格式瑕疵。
+
         返回 (兜底纯文本, 是否已导出 PDF 并直传)。第二个值为 True 时文档已作为
-        PDF 进入 payload，可让视觉模型转写（含图片描述）回填「文档内容缓存」；
-        为 False 时只能用 raw_content 纯文本，其中的图片是占位符。
+        PDF 进入 payload，可让视觉模型转写（含图片描述）回填「文档内容缓存」。
         """
-        if not doc_id:
-            # 无法解析 doc_id 时，尝试缓存字段
+        token, kind = doc_ref
+        if not token:
+            # 无法解析 token 时，尝试缓存字段
             return fields.get(FIELD_DOC_CACHE, "") or "", False
 
-        if direct_mode:
-            pdf = await self._feishu.export_doc_to_pdf(doc_id)
-            if pdf:
-                pdf_files.append((pdf, f"{doc_id}.pdf"))
-                # 直传成功仍抓一次纯文本作兜底（供 payload.text），失败不阻塞
-                raw = await self._feishu.get_doc_raw_content(doc_id)
-                return raw or "", True
-            logger.info("在线文档导出 PDF 失败，回退纯文本: doc_id=%s", doc_id)
+        # 解析真实文档 token/type：wiki 节点需经 Wiki API 解析挂载文档；
+        # 旧版 docs 用 "doc" 类型；其余按 docx。解析失败则回退到原 token
+        # （raw_content 仍可能可读，只是无法导出 PDF）。
+        export_token, export_type, raw_doc_id = token, "docx", token
+        if kind == "wiki":
+            resolved = await self._feishu.get_wiki_node(token)
+            if resolved:
+                export_token, export_type = resolved
+                raw_doc_id = export_token
+            else:
+                logger.info("wiki 节点解析失败，按原 token 回退: token=%s", token)
+        elif kind == "docs":
+            export_type = "doc"
 
-        raw = await self._feishu.get_doc_raw_content(doc_id)
+        if direct_mode:
+            pdf = await self._feishu.export_doc_to_pdf(export_token, export_type)
+            if pdf:
+                pdf_files.append((pdf, f"{export_token}.pdf"))
+                # 直传成功仍抓一次纯文本作兜底（供 payload.text），失败不阻塞
+                raw = await self._feishu.get_doc_raw_content(raw_doc_id)
+                return strip_image_placeholders(raw or ""), True
+            logger.info(
+                "在线文档导出 PDF 失败，回退纯文本: doc_id=%s", export_token
+            )
+
+        raw = await self._feishu.get_doc_raw_content(raw_doc_id)
         if raw:
-            return raw, False
+            return strip_image_placeholders(raw), False
         return fields.get(FIELD_DOC_CACHE, "") or "", False
 
     async def _collect_attachment(

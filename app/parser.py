@@ -36,32 +36,73 @@ IMAGE_MIME_TYPES = {
 # 附件分类结果
 AttachmentKind = Literal["pdf", "docx", "text", "image", "unsupported"]
 
-# 飞书文档链接模式
-FEISHU_DOC_PATTERNS = [
-    re.compile(r"feishu\.cn/docx/([A-Za-z0-9_-]+)"),
-    re.compile(r"feishu\.cn/wiki/([A-Za-z0-9_-]+)"),
-    re.compile(r"feishu\.cn/docs/([A-Za-z0-9_-]+)"),
-    re.compile(r"bytedance\.net/docx/([A-Za-z0-9_-]+)"),
-    re.compile(r"larkoffice\.com/docx/([A-Za-z0-9_-]+)"),
+# 飞书文档链接模式（按路径匹配，兼容 feishu.cn / larkoffice.com / bytedance.net
+# 等各种域名）。kind 用于区分文档形态：
+#   - wiki：知识库节点，token 是节点 token，需再解析出挂载文档的真实 obj_token；
+#   - docx：新版文档，token 即 document_id，可直接读取/导出；
+#   - docs：旧版文档。
+_DOC_URL_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
+    ("wiki", re.compile(r"/wiki/([A-Za-z0-9_-]+)")),
+    ("docx", re.compile(r"/docx/([A-Za-z0-9_-]+)")),
+    ("docs", re.compile(r"/docs/([A-Za-z0-9_-]+)")),
 ]
 
 
+def extract_document_ref(url: str) -> tuple[str | None, str]:
+    """从飞书文档 URL 中解析出 (token, kind)。
+
+    kind ∈ {"wiki", "docx", "docs"}；解析失败返回 (None, "")。
+    wiki 链接的 token 是知识库节点 token，并非真实文档 token，调用方需再经
+    Wiki API 解析出挂载文档的 obj_token/obj_type 才能读取或导出。
+    """
+    if not url:
+        return None, ""
+    for kind, pattern in _DOC_URL_PATTERNS:
+        match = pattern.search(url)
+        if match:
+            return match.group(1), kind
+    return None, ""
+
+
 def extract_document_id(url: str) -> str | None:
-    """从飞书文档 URL 中提取 document_id。
+    """从飞书文档 URL 中提取 token（不区分文档形态）。
 
     Args:
         url: 飞书文档链接，如 https://xxx.feishu.cn/docx/AbCdEfGhI...
 
     Returns:
-        document_id 字符串，解析失败返回 None。
+        token 字符串，解析失败返回 None。
     """
-    if not url:
-        return None
-    for pattern in FEISHU_DOC_PATTERNS:
-        match = pattern.search(url)
-        if match:
-            return match.group(1)
-    return None
+    token, _ = extract_document_ref(url)
+    return token
+
+
+# 飞书 docx.raw_content 接口会把每张内嵌图片渲染成"裸文件名"独占一行
+# （截图/粘贴图默认名 image.png，也可能是 image (1).png、截图.jpg 等）。这些
+# 既不是用户撰写的真实内容，又会被评分模型当成"冗余占位符"扣格式分，故在进入
+# 评分文本与缓存前统一清洗掉。仅匹配"整行就是一个图片文件名"的情况，避免误删
+# 正文中顺带提到文件名的句子。
+_IMAGE_PLACEHOLDER_LINE = re.compile(
+    r"^[\w一-鿿.\-()（） ]{1,80}\.(?:png|jpe?g|gif|webp|bmp|svg|tiff?)$",
+    re.IGNORECASE,
+)
+
+
+def strip_image_placeholders(text: str) -> str:
+    """移除飞书 raw_content 里的裸图片占位符行（如独占一行的 image.png）。
+
+    清洗后压缩多余空行，返回纯文本。空输入原样返回。
+    """
+    if not text:
+        return text
+    kept = [
+        line
+        for line in text.splitlines()
+        if not _IMAGE_PLACEHOLDER_LINE.match(line.strip())
+    ]
+    cleaned = "\n".join(kept)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip("\n")
 
 
 def extract_text_from_attachment(
