@@ -64,8 +64,8 @@
 
 ### 任务
 
-- [ ] 增加 `pytest` 和 `pytest-asyncio`。
-- [ ] 建立 Fake Feishu Client、Fake AI Client 和可控时钟。
+- [x] 增加 `pytest` 和 `pytest-asyncio`。
+- [x] 建立 Fake Feishu Client、Fake AI Client 和可控时钟。
 - [ ] 测试首次提交只自动触发一次评分。
 - [ ] 测试“未通过”状态下多次增删附件不会自动评分。
 - [ ] 测试修改在线文档后点击按钮会读取最新内容。
