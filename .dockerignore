@@ -25,3 +25,5 @@ tests/
 
 # 系统文件
 .DS_Store
+
+pytext.ini
