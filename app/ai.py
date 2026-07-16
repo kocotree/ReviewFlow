@@ -13,7 +13,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from openai import AsyncOpenAI
+from pydantic import ValidationError
+
 from app.config import Config
+from app.errors import ErrorCategory, ReviewFlowError
+from app.models.scoring import ScoringResult
 
 logger = logging.getLogger(__name__)
 
@@ -44,22 +49,16 @@ def doubao_supports_file(model: str) -> bool:
 class ScoringPayload:
     """评分素材包。
 
-    把「三段纯文本」升级为「文本 + 一组待直传的文件/图片」，由 AIClient
-    按当前 provider 能力决定走直传还是降级为纯文本。
-
-    - text: 已拼好并截断的纯文本（文本字段 + 各类降级抽取文本），始终作为
-      兜底，即使走文件直传也一并发送，确保非多模态 provider 有内容可评。
-    - pdf_files: 待直传的 PDF，元素为 (bytes, 文件名)。
-    - image_files: 待直传的图片，元素为 (bytes, mime_type)。
+    采集层已经把全部在线文档和附件合并成唯一 PDF；原始描述作为独立文本，
+    不再保留纯文本降级或独立图片模态。
     """
 
     text: str = ""
     pdf_files: list[tuple[bytes, str]] = field(default_factory=list)
-    image_files: list[tuple[bytes, str]] = field(default_factory=list)
 
     def has_direct_files(self) -> bool:
-        """是否存在可直传的文件或图片。"""
-        return bool(self.pdf_files or self.image_files)
+        """是否存在可直传的总 PDF。"""
+        return bool(self.pdf_files)
 
     def is_empty(self) -> bool:
         """可用内容是否为空（无文本且无可直传文件）。"""
@@ -163,24 +162,16 @@ TRANSCRIBE_SYSTEM_PROMPT = """\
 - 只转写、不做任何评价或打分；
 - 直接输出转写正文纯文本，不要输出 JSON、不要加多余前后缀，整体控制在 4000 字以内。"""
 
-SCORING_USER_PROMPT_TEMPLATE = """\
-请对以下提交内容进行综合评分：
-
-=== 文本内容 ===
-{text_content}
-
-=== 文档内容 ===
-{doc_content}
-
-=== 附件内容 ===
-{attachment_content}
-
-请按照 JSON 格式输出评分结果。"""
-
-
-class AIScoringError(Exception):
+class AIScoringError(ReviewFlowError):
     """AI 评分异常。"""
-    pass
+
+    category = ErrorCategory.SYSTEM_HARD_FAILURE
+
+
+class AITransientError(AIScoringError):
+    """AI 网络、限流或临时服务错误。"""
+
+    category = ErrorCategory.TRANSIENT
 
 
 class AIClient:
@@ -189,30 +180,33 @@ class AIClient:
     使用示例::
 
         client = AIClient(config)
-        result = await client.score(
-            text_content="这是文本内容",
-            doc_content="这是文档内容",
-            attachment_content="这是附件内容",
-        )
+        result = await client.score(ScoringPayload(text="这是文本内容"))
         print(result["score"])  # 85
     """
 
-    def __init__(self, config: Config) -> None:
+    def __init__(
+        self,
+        config: Config,
+        client: AsyncOpenAI | None = None,
+    ) -> None:
         self._config = config
         self._provider = config.ai_provider
+        base_url = config.ai_base_url or "https://ark.cn-beijing.volces.com/api/v3"
+        self._client = client or AsyncOpenAI(
+            api_key=config.ai_api_key,
+            base_url=base_url,
+        )
 
-    async def score(
-        self,
-        payload: ScoringPayload | None = None,
-        *,
-        text_content: str = "",
-        doc_content: str = "",
-        attachment_content: str = "",
-    ) -> dict[str, Any]:
+    @property
+    def supports_pdf_input(self) -> bool:
+        return self._provider == "doubao" and doubao_supports_file(
+            self._config.ai_model
+        )
+
+    async def score(self, payload: ScoringPayload) -> dict[str, Any]:
         """执行 AI 评分，返回包含 score/detail/dimensions 的 dict。
 
-        推荐传入 ScoringPayload（支持文件/图片直传）；也兼容旧的三段
-        text 关键字参数（纯文本评分）。
+        评分入口只接收 ScoringPayload，文本与文件素材由调用方预先归一化。
 
         评分只做评分，不再顺带转写文档——文档转写已拆分为独立的
         transcribe() 调用，避免转写文本把评分响应撑长而被 max_tokens 截断。
@@ -220,16 +214,6 @@ class AIClient:
         Raises:
             AIScoringError: AI 调用失败或解析失败时抛出。
         """
-        if payload is None:
-            # 兼容旧调用：把三段文本拼成 payload 的纯文本
-            payload = ScoringPayload(
-                text=SCORING_USER_PROMPT_TEMPLATE.format(
-                    text_content=text_content or "（无）",
-                    doc_content=doc_content or "（无）",
-                    attachment_content=attachment_content or "（无）",
-                )
-            )
-
         raw_response: str | None = None
 
         # 当前仅支持豆包 provider（其余 provider 已下线，后续如需再按此分派补回）。
@@ -263,17 +247,14 @@ class AIClient:
             return None
         return await self._call_doubao_transcribe(payload)
 
+    async def close(self) -> None:
+        """关闭复用的异步 OpenAI HTTP Client。"""
+        await self._client.close()
+
     async def _call_doubao(self, user_prompt: str) -> str | None:
         """调用飞书豆包 API（通过 OpenAI 兼容接口）。"""
         try:
-            from openai import AsyncOpenAI
-
-            base_url = self._config.ai_base_url or "https://ark.cn-beijing.volces.com/api/v3"
-            client = AsyncOpenAI(
-                api_key=self._config.ai_api_key,
-                base_url=base_url,
-            )
-            resp = await client.chat.completions.create(
+            resp = await self._client.chat.completions.create(
                 model=self._config.ai_model or "doubao-pro-32k",
                 messages=[
                     {"role": "system", "content": SCORING_SYSTEM_PROMPT},
@@ -285,12 +266,12 @@ class AIClient:
             return resp.choices[0].message.content
         except Exception as e:
             logger.error("豆包 调用失败: %s", e)
-            raise AIScoringError(f"豆包调用失败: {e}") from e
+            raise AITransientError(f"豆包调用失败: {e}") from e
 
     def _build_doubao_content(
         self, payload: ScoringPayload, fallback_text: str
     ) -> list[dict[str, Any]]:
-        """构造豆包多模态 content 数组：文本 + 若干 PDF file 部件 + 若干图片部件。
+        """构造豆包多模态 content 数组：文本 + 唯一总 PDF。
 
         PDF 用 base64 data-URI 内联（file_data），避免 Files API 两步上传。
         评分与转写共用此逻辑，仅首段文本提示词不同。
@@ -310,35 +291,20 @@ class AIClient:
                 },
             })
 
-        for data, mime in payload.image_files:
-            b64 = base64.b64encode(data).decode("utf-8")
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:{mime};base64,{b64}"},
-            })
-
         return content
 
     async def _call_doubao_multimodal(self, payload: ScoringPayload) -> str | None:
-        """调用豆包 API 评分，直传 PDF（file 模态）与图片（image_url 模态）。
+        """调用豆包 API 评分，直传唯一总 PDF（file 模态）。
 
         仅评分、不转写——文档转写已拆分为独立的 _call_doubao_transcribe，
         故此处响应短、max_tokens 精简，不会被转写文本撑长而截断。
         """
         try:
-            from openai import AsyncOpenAI
-
-            base_url = self._config.ai_base_url or "https://ark.cn-beijing.volces.com/api/v3"
-            client = AsyncOpenAI(
-                api_key=self._config.ai_api_key,
-                base_url=base_url,
-            )
-
             content = self._build_doubao_content(
                 payload, "请对随附文件进行综合评分。"
             )
 
-            resp = await client.chat.completions.create(
+            resp = await self._client.chat.completions.create(
                 model=self._config.ai_model,
                 messages=[
                     {"role": "system", "content": SCORING_SYSTEM_PROMPT},
@@ -350,7 +316,7 @@ class AIClient:
             return resp.choices[0].message.content
         except Exception as e:
             logger.error("豆包多模态调用失败: %s", e)
-            raise AIScoringError(f"豆包多模态调用失败: {e}") from e
+            raise AITransientError(f"豆包多模态调用失败: {e}") from e
 
     async def _call_doubao_transcribe(self, payload: ScoringPayload) -> str | None:
         """调用豆包 API 转写直传 PDF/图片，返回纯文本转写正文（不评分）。
@@ -359,19 +325,11 @@ class AIClient:
         max_tokens；即便被截断也只影响缓存回填，不会污染评分。
         """
         try:
-            from openai import AsyncOpenAI
-
-            base_url = self._config.ai_base_url or "https://ark.cn-beijing.volces.com/api/v3"
-            client = AsyncOpenAI(
-                api_key=self._config.ai_api_key,
-                base_url=base_url,
-            )
-
             content = self._build_doubao_content(
                 payload, "请对随附文件/图片进行忠实文字转写。"
             )
 
-            resp = await client.chat.completions.create(
+            resp = await self._client.chat.completions.create(
                 model=self._config.ai_model,
                 messages=[
                     {"role": "system", "content": TRANSCRIBE_SYSTEM_PROMPT},
@@ -383,62 +341,53 @@ class AIClient:
             return resp.choices[0].message.content
         except Exception as e:
             logger.error("豆包转写调用失败: %s", e)
-            raise AIScoringError(f"豆包转写调用失败: {e}") from e
+            raise AITransientError(f"豆包转写调用失败: {e}") from e
 
     def _parse_response(self, text: str) -> dict[str, Any]:
-        """容错式 JSON 解析，应对 AI 不严格返回 JSON 的情况。
+        """Decode a JSON object and validate the complete scoring schema.
 
-        尝试顺序:
-        1. 直接 json.loads
-        2. 正则提取 JSON 块后 json.loads
-        3. 正则提取 score 字段兜底
+        Tolerance is intentionally limited to removing one Markdown code fence or
+        extracting a complete JSON object embedded in surrounding prose. Missing,
+        truncated, coerced, or internally inconsistent values are never repaired.
         """
-        # 方式 1: 直接解析
+        data = self._decode_response_json(text)
         try:
-            return json.loads(text)
+            result = ScoringResult.model_validate(data)
+        except ValidationError as exc:
+            raise AIScoringError(f"AI 评分响应校验失败: {exc}") from exc
+        return result.model_dump()
+
+    @staticmethod
+    def _decode_response_json(text: str) -> Any:
+        """Return decoded JSON after the two allowed syntactic recoveries."""
+        if not isinstance(text, str) or not text.strip():
+            raise AIScoringError("AI 返回空响应")
+
+        candidate = text.strip()
+        fenced = re.fullmatch(
+            r"```(?:json)?\s*(.*?)\s*```",
+            candidate,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if fenced:
+            candidate = fenced.group(1).strip()
+
+        try:
+            return json.loads(candidate)
         except json.JSONDecodeError:
             pass
 
-        # 方式 2: 提取最外层 JSON 对象
-        match = re.search(r"\{[\s\S]*\}", text)
-        if match:
+        decoder = json.JSONDecoder()
+        for opening in re.finditer(r"[\[{]", candidate):
             try:
-                return json.loads(match.group())
+                value, _ = decoder.raw_decode(candidate[opening.start():])
             except json.JSONDecodeError:
-                pass
+                continue
 
-        # 方式 3: 兜底 —— 正则逐字段提取。
-        # 常见触发场景：content_text（文档转写）位于 JSON 末尾，响应被 max_tokens
-        # 截断导致整体 JSON 非法，但前半段的 score / detail / dimensions 通常完整可读，
-        # 故此处逐字段正则捞回，避免维度分被硬编码填 0、造成 score 与 dimensions 不一致。
-        logger.warning("JSON 解析失败，使用正则兜底提取。原始响应: %s", text[:500])
+            # A leading array is a complete JSON value, but scoring requires an
+            # object. Return it for schema validation instead of accepting an
+            # object nested inside that array during a later scan.
+            if isinstance(value, (dict, list)):
+                return value
 
-        score_match = re.search(r'"score"[\s:]*(\d+)', text)
-        score = int(score_match.group(1)) if score_match else 0
-        score = max(0, min(100, score))  # 限制在 0-100
-
-        def _grab_str(name: str) -> str:
-            m = re.search(rf'"{name}"[\s:]*"([^"]*)"', text)
-            return m.group(1) if m else ""
-
-        detail = _grab_str("detail") or text[:500]
-
-        def _grab_dim(name: str) -> int:
-            m = re.search(rf'"{name}"[\s:]*(\d+)', text)
-            return int(m.group(1)) if m else 0
-
-        return {
-            "score": score,
-            "detail": detail,
-            # 正向字段（通过卡片用）：截断时尽力捞回，捞不到就退回空串，
-            # 由通知层退化为「仅展示分数」，不影响评分主流程。
-            "highlights": _grab_str("highlights"),
-            "improvements": _grab_str("improvements"),
-            "dimensions": {
-                "completeness": _grab_dim("completeness"),
-                "logic": _grab_dim("logic"),
-                "format": _grab_dim("format"),
-                "quality": _grab_dim("quality"),
-            },
-            "_parse_fallback": True,
-        }
+        raise AIScoringError("AI 返回内容不是有效的 JSON 对象")
