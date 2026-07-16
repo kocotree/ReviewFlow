@@ -109,7 +109,7 @@
 - [ ] 测试 AI 完成后最终写回失败。
 - [ ] 测试附件下载和文档读取发生临时错误。
 - [ ] 测试附件格式错误和空内容卡片也可以触发重新评分。
-- [ ] 测试 AI 返回数组、空对象、错误字段类型和非 JSON 文本。
+- [x] 测试 AI 返回数组、空对象、错误字段类型和非 JSON 文本。
 - [ ] 测试服务关闭时仍有评分任务运行。
 
 ### 涉及文件
@@ -294,14 +294,14 @@
 
 ### 任务
 
-- [ ] 使用 Pydantic 定义 `ScoringResult` 和 `ScoringDimensions`。
-- [ ] 校验总分、维度分的类型和范围。
-- [ ] 校验四个维度之和等于总分。
-- [ ] 限制 `detail`、`highlights` 和 `improvements` 长度。
-- [ ] JSON 容错仅负责去除代码块或提取对象。
-- [ ] 无法验证的响应抛出 `AIScoringError`，不得转换为 0 分。
-- [ ] 复用一个 `AsyncOpenAI` Client。
-- [ ] 删除未使用的旧版三文本评分入口。
+- [x] 使用 Pydantic 定义 `ScoringResult` 和 `ScoringDimensions`。
+- [x] 校验总分、维度分的类型和范围。
+- [x] 校验四个维度之和等于总分。
+- [x] 限制 `detail`、`highlights` 和 `improvements` 长度。
+- [x] JSON 容错仅负责去除代码块或提取对象。
+- [x] 无法验证的响应抛出 `AIScoringError`，不得转换为 0 分。
+- [x] 复用一个 `AsyncOpenAI` Client。
+- [x] 删除未使用的旧版三文本评分入口。
 
 ### 涉及文件
 
