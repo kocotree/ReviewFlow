@@ -52,7 +52,9 @@ class Config:
         default_factory=lambda: os.getenv("AI_API_KEY", "")
     )
     ai_model: str = field(
-        default_factory=lambda: os.getenv("AI_MODEL", "gpt-4o")
+        default_factory=lambda: os.getenv(
+            "AI_MODEL", "doubao-seed-2-0-pro-260215"
+        )
     )
     ai_base_url: str = field(
         default_factory=lambda: os.getenv("AI_BASE_URL", "")
@@ -104,6 +106,11 @@ class Config:
         )
     )
 
+    # ---- 后台任务 ----
+    shutdown_timeout_seconds: float = field(
+        default_factory=lambda: float(os.getenv("SHUTDOWN_TIMEOUT_SECONDS", "30"))
+    )
+
     # ---- 服务配置 ----
     host: str = field(
         default_factory=lambda: os.getenv("HOST", "0.0.0.0")
@@ -116,29 +123,57 @@ class Config:
     )
 
     def validate(self) -> list[str]:
-        """校验必填配置项，返回缺失项列表。"""
-        missing: list[str] = []
+        """返回全部启动配置错误，便于一次修完而非逐项试错。"""
+        errors: list[str] = []
         if not self.feishu_app_id:
-            missing.append("FEISHU_APP_ID")
+            errors.append("FEISHU_APP_ID 不能为空")
         if not self.feishu_app_secret:
-            missing.append("FEISHU_APP_SECRET")
+            errors.append("FEISHU_APP_SECRET 不能为空")
         if not self.bitable_app_token:
-            missing.append("BITABLE_APP_TOKEN")
+            errors.append("BITABLE_APP_TOKEN 不能为空")
         if not self.bitable_table_id:
-            missing.append("BITABLE_TABLE_ID")
-        if not self.ai_api_key and self.ai_provider != "doubao":
-            missing.append("AI_API_KEY")
-        return missing
+            errors.append("BITABLE_TABLE_ID 不能为空")
+        if not self.webhook_verification_token:
+            errors.append("WEBHOOK_VERIFICATION_TOKEN 不能为空")
+        if not self.webhook_encrypt_key:
+            errors.append("WEBHOOK_ENCRYPT_KEY 不能为空")
+
+        if self.ai_provider not in {"doubao"}:
+            errors.append(f"AI_PROVIDER 不受支持: {self.ai_provider}")
+        if not self.ai_api_key:
+            errors.append("AI_API_KEY 不能为空")
+        if not self.ai_model:
+            errors.append("AI_MODEL 不能为空")
+        if not 0 <= self.ai_temperature <= 2:
+            errors.append("AI_TEMPERATURE 必须在 0 到 2 之间")
+        if not 1 <= self.ai_score_max_tokens <= 128_000:
+            errors.append("AI_SCORE_MAX_TOKENS 必须在 1 到 128000 之间")
+        if not 1 <= self.ai_transcribe_max_tokens <= 128_000:
+            errors.append("AI_TRANSCRIBE_MAX_TOKENS 必须在 1 到 128000 之间")
+
+        if not 0 <= self.score_threshold <= 100:
+            errors.append("SCORE_THRESHOLD 必须在 0 到 100 之间")
+        if self.max_revision_rounds < 1:
+            errors.append("MAX_REVISION_ROUNDS 必须大于 0")
+        if self.send_circuit_breaker_window_minutes < 1:
+            errors.append("SEND_CIRCUIT_BREAKER_WINDOW_MINUTES 必须大于 0")
+        if self.send_circuit_breaker_max_messages < 1:
+            errors.append("SEND_CIRCUIT_BREAKER_MAX_MESSAGES 必须大于 0")
+        if self.shutdown_timeout_seconds <= 0:
+            errors.append("SHUTDOWN_TIMEOUT_SECONDS 必须大于 0")
+        if not 1 <= self.port <= 65_535:
+            errors.append("PORT 必须在 1 到 65535 之间")
+        return errors
 
 
 @lru_cache(maxsize=1)
 def get_config() -> Config:
     """获取全局配置单例。"""
     cfg = Config()
-    missing = cfg.validate()
-    if missing:
+    errors = cfg.validate()
+    if errors:
         raise ValueError(
-            f"缺少必要的环境变量: {', '.join(missing)}。"
-            f"请参考 .env.example 配置 .env 文件。"
+            "配置校验失败：" + "；".join(errors) + "。"
+            "请参考 .env.example 修正环境变量。"
         )
     return cfg
