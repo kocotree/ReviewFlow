@@ -1,16 +1,15 @@
-version: "3.8"
-
 services:
   reviewflow:
     build: .
     container_name: reviewflow
-    # 入口改由服务器上已有的 Traefik 实例统一处理（HTTPS + 域名），
-    # 不再直接向宿主机暴露端口。如需本地/内网直连调试，取消下面注释即可：
-    # ports:
-    #   - "${PORT:-8000}:8000"
+    # 默认直接映射端口，适合本地或由宿主机反向代理接入。
+    ports:
+      - "${PORT:-8000}:8000"
     env_file:
       - .env
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/', timeout=4).status==200 else 1)"]
       interval: 30s
@@ -23,8 +22,9 @@ services:
         max-size: "10m"
         max-file: "3"
     labels:
-      # 启用 Traefik（由服务器上已有的 Traefik 实例自动发现本容器）
-      - "traefik.enable=true"
+      # 默认关闭 Traefik 自动发现。启用时同时配置真实 Host/证书解析器，
+      # 并把底部网络改为 external: true。
+      - "traefik.enable=false"
       # HTTPS 路由器：把 example.com 换成你的域名（飞书 webhook 就配到这个域名）
       - "traefik.http.routers.reviewflow.rule=Host(`example.com`)"
       # entrypoint 名称须与你的 Traefik 静态配置一致（常见为 websecure / https）
@@ -42,5 +42,5 @@ services:
 
 networks:
   traefik-network:
-    # external: true 表示复用已有网络（由 Traefik 侧创建），不在此文件中新建
-    external: true
+    # 默认创建普通内部网络；启用外部 Traefik 时改为 true。
+    external: false

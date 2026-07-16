@@ -468,11 +468,11 @@
 
 ### 部署
 
-- [ ] 容器改为非 root 用户运行。
-- [ ] 固定依赖版本并生成锁文件。
-- [ ] 确认普通事件和补发事件的正确 SDK 版本及注册方式。
+- [x] 容器改为非 root 用户运行。
+- [x] 固定依赖版本并生成锁文件。
+- [x] 确认普通事件和补发事件的正确 SDK 版本及注册方式。
 - [x] 增加飞书配置、模型配置和 LibreOffice 启动自检。
-- [ ] 统一 `docker-compose.yml` 与 README 的 Traefik 和端口说明。
+- [x] 统一 `docker-compose.yml` 与 README 的 Traefik 和端口说明。
 - [x] 将 `.env.example` 中的环境相关 ID 改为占位符。
 
 ### 验收标准

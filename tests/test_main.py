@@ -110,6 +110,37 @@ def test_default_runtime_rejects_missing_libreoffice(monkeypatch, config) -> Non
         main_module.build_default_runtime(config)
 
 
+def test_event_handler_registers_normal_and_replay_methods_when_sdk_exposes_both(
+    monkeypatch,
+    config,
+) -> None:
+    import app.main as main_module
+
+    calls = []
+
+    class Builder:
+        def register_p2_drive_file_bitable_record_changed_v1(self, callback):
+            calls.append("normal")
+            return self
+
+        def registration_p2_drive_file_bitable_record_changed_v1(self, callback):
+            calls.append("replay")
+            return self
+
+        def build(self):
+            return "handler"
+
+    class Dispatcher:
+        @staticmethod
+        def builder(**kwargs):
+            return Builder()
+
+    monkeypatch.setattr(main_module, "EventDispatcherHandler", Dispatcher)
+
+    assert main_module._build_event_handler(config, runtime(config)) == "handler"
+    assert calls == ["normal", "replay"]
+
+
 @pytest.mark.asyncio
 async def test_record_event_is_deduplicated_and_delete_is_skipped(config) -> None:
     app_runtime = runtime(config)

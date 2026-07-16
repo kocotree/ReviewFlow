@@ -12,12 +12,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 Python 依赖
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# 安装锁定的 Python 依赖
+COPY requirements.lock .
+RUN pip install --no-cache-dir -r requirements.lock
+
+# 运行用户不授予 shell/root 权限；LibreOffice 临时文件写入 /tmp。
+RUN groupadd --system --gid 10001 reviewflow \
+    && useradd --system --uid 10001 --gid reviewflow --home-dir /app reviewflow
 
 # 复制源码
-COPY . .
+COPY --chown=reviewflow:reviewflow . .
+
+USER reviewflow
 
 # 暴露端口
 EXPOSE 8000
