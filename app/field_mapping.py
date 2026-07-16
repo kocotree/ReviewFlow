@@ -4,6 +4,8 @@
 # 如果多维表格中的字段名不同，请修改以下常量。
 
 # --- 用户输入字段 ---
+FIELD_REQUIREMENT_TITLE = "需求标题"    # 单行文本/主字段，用于任务日志标识
+FIELD_IS_RPA = "是否RPA"              # 单选/文本：值为“是”时才进入评分流程
 FIELD_SUBMITTER = "提报人"           # 飞书人员字段
 FIELD_TEXT_CONTENT = "原始描述"       # 多行文本
 FIELD_DOC_LINK = "需求文档"       # 超链接

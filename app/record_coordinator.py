@@ -11,7 +11,12 @@ from enum import StrEnum
 from typing import Any, Awaitable, Callable
 
 from app.errors import FeishuNotFoundError
-from app.field_mapping import FIELD_SCORE_STATUS, FIELD_SUBMITTER
+from app.field_mapping import (
+    FIELD_IS_RPA,
+    FIELD_REQUIREMENT_TITLE,
+    FIELD_SCORE_STATUS,
+    FIELD_SUBMITTER,
+)
 from app.task_registry import (
     RecordKey,
     ScoreCommand,
@@ -35,10 +40,59 @@ def extract_open_id(submitter: Any) -> str:
     return str(submitter or "")
 
 
+def is_rpa_enabled(value: Any) -> bool:
+    """兼容单选文本、布尔值和飞书结构化字段，只接受明确的“是”。"""
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip() == "是"
+    if isinstance(value, dict):
+        return any(
+            is_rpa_enabled(value.get(key))
+            for key in ("text", "name", "value")
+            if key in value
+        )
+    if isinstance(value, (list, tuple)):
+        return any(is_rpa_enabled(item) for item in value)
+    return False
+
+
+_MAX_REQUIREMENT_TITLE_CHARS = 80
+
+
+def extract_requirement_title(fields: dict[str, Any], record_id: str) -> str:
+    """读取“需求标题”用于日志；字段为空时使用 record_id 保持可定位。"""
+    title = _display_text(fields.get(FIELD_REQUIREMENT_TITLE))
+    return _normalize_requirement_title(title) if title else record_id
+
+
+def _display_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("text", "title", "name", "value"):
+            text = _display_text(value.get(key))
+            if text:
+                return text
+        return ""
+    if isinstance(value, (list, tuple)):
+        parts = [_display_text(item) for item in value]
+        return " ".join(part for part in parts if part)
+    return ""
+
+
+def _normalize_requirement_title(value: str) -> str:
+    normalized = " ".join(value.split())
+    if len(normalized) <= _MAX_REQUIREMENT_TITLE_CHARS:
+        return normalized
+    return normalized[: _MAX_REQUIREMENT_TITLE_CHARS - 3].rstrip() + "..."
+
+
 class RequestStatus(StrEnum):
     ACCEPTED = "accepted"
     ALREADY_RUNNING = "already_running"
     DUPLICATE_CALLBACK = "duplicate_callback"
+    NOT_RPA = "not_rpa"
     NOT_TRIGGERABLE = "not_triggerable"
     FORBIDDEN = "forbidden"
     RECORD_NOT_FOUND = "record_not_found"
@@ -155,6 +209,10 @@ class RecordCoordinator:
                 self._release_callback(callback_id)
                 return ScoreRequestResult(RequestStatus.RECORD_NOT_FOUND)
 
+            if not is_rpa_enabled(fields.get(FIELD_IS_RPA)):
+                self._release_callback(callback_id)
+                return ScoreRequestResult(RequestStatus.NOT_RPA)
+
             try:
                 status = ScoreStatus(fields.get(FIELD_SCORE_STATUS, ScoreStatus.PENDING))
             except ValueError:
@@ -183,6 +241,7 @@ class RecordCoordinator:
                 runner=self._runner,
                 actor_open_id=actor_open_id,
                 callback_id=callback_id,
+                requirement_title=extract_requirement_title(fields, key.record_id),
             )
             if submit.status is SubmitStatus.ACCEPTED:
                 return ScoreRequestResult(RequestStatus.ACCEPTED, submit.command)

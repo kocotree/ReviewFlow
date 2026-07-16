@@ -47,6 +47,7 @@ def decoded(action: str = ACTION_RESCORE, *, chat_id: str = "") -> DecodedCardAc
         (RequestStatus.ACCEPTED, "已提交重新评分"),
         (RequestStatus.DUPLICATE_CALLBACK, "已提交重新评分"),
         (RequestStatus.ALREADY_RUNNING, "正在评分"),
+        (RequestStatus.NOT_RPA, "是否RPA"),
         (RequestStatus.NOT_TRIGGERABLE, "不可重新评分"),
         (RequestStatus.FORBIDDEN, "原提报人"),
     ],

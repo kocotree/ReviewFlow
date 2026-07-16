@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
+from Crypto.Cipher import AES
 from fastapi.testclient import TestClient
 
 from app.background_tasks import BackgroundTaskSupervisor
-from app.main import AppRuntime, EventDeduplicator, _enqueue_record_changes, create_app
+from app.main import (
+    AppRuntime,
+    EventDeduplicator,
+    _RoutineAccessLogFilter,
+    _enqueue_record_changes,
+    create_app,
+)
 from app.record_coordinator import RecordCoordinator, RequestStatus, ScoreRequestResult
 from app.task_registry import RecordKey, TaskRegistry
 from app.workflow_state import TriggerSource
@@ -66,6 +75,72 @@ def event_data(*actions, event_id: str = "evt_1"):
 
 def action(record_id: str, kind: str = "record_edited"):
     return SimpleNamespace(record_id=record_id, action=kind)
+
+
+def encrypted_p2_card_body(config, value: dict[str, str]) -> bytes:
+    plaintext = json.dumps(
+        {
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt_card_1",
+                "event_type": "card.action.trigger",
+                "create_time": "1700000000000",
+                "token": config.webhook_verification_token,
+                "app_id": config.feishu_app_id,
+                "tenant_key": "tenant_test",
+            },
+            "event": {
+                "operator": {
+                    "tenant_key": "tenant_test",
+                    "open_id": "ou_submitter",
+                    "union_id": "on_submitter",
+                },
+                "token": config.webhook_verification_token,
+                "action": {"value": value, "tag": "button"},
+                "host": "im_message",
+                "context": {
+                    "open_message_id": "om_1",
+                    "open_chat_id": "",
+                },
+            },
+        },
+        separators=(",", ":"),
+    ).encode()
+    iv = b"0123456789abcdef"
+    key = hashlib.sha256(config.webhook_encrypt_key.encode()).digest()
+    padding = AES.block_size - len(plaintext) % AES.block_size
+    padded = plaintext + bytes([padding]) * padding
+    ciphertext = iv + AES.new(key, AES.MODE_CBC, iv).encrypt(padded)
+    return json.dumps(
+        {"encrypt": base64.b64encode(ciphertext).decode()},
+        separators=(",", ":"),
+    ).encode()
+
+
+def access_log_record(method: str, path: str, status: int) -> logging.LogRecord:
+    return logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg='%s - "%s %s HTTP/%s" %d',
+        args=("127.0.0.1:12345", method, path, "1.1", status),
+        exc_info=None,
+    )
+
+
+def test_access_log_filter_hides_routine_success_but_keeps_scans_and_errors() -> None:
+    access_filter = _RoutineAccessLogFilter()
+
+    assert not access_filter.filter(access_log_record("GET", "/", 200))
+    assert not access_filter.filter(
+        access_log_record("POST", "/webhook/event", 200)
+    )
+    assert not access_filter.filter(
+        access_log_record("POST", "/webhook/card-action", 200)
+    )
+    assert access_filter.filter(access_log_record("POST", "/webhook/event", 500))
+    assert access_filter.filter(access_log_record("GET", "/.env", 404))
 
 
 def test_create_app_does_not_read_configuration_at_import_time() -> None:
@@ -284,7 +359,7 @@ def test_event_deduplicator_recovers_after_window(clock) -> None:
     assert deduplicator.claim("evt")
 
 
-def test_card_action_route_reuses_lark_verification_and_returns_feedback(config) -> None:
+def test_card_action_route_accepts_encrypted_p2_callback_and_returns_feedback(config) -> None:
     app_runtime = runtime(config)
     app_runtime.coordinator.release.set()
     application = create_app(
@@ -297,19 +372,11 @@ def test_card_action_route_reuses_lark_verification_and_returns_feedback(config)
         "table_id": "table",
         "record_id": "record",
     }
-    body = json.dumps(
-        {
-            "open_id": "ou_submitter",
-            "open_message_id": "om_1",
-            "open_chat_id": "",
-            "action": {"value": value},
-        },
-        separators=(",", ":"),
-    ).encode()
+    body = encrypted_p2_card_body(config, value)
     timestamp = "1700000000"
     nonce = "nonce"
-    signature = hashlib.sha1(
-        (timestamp + nonce + config.webhook_verification_token).encode() + body
+    signature = hashlib.sha256(
+        (timestamp + nonce + config.webhook_encrypt_key).encode() + body
     ).hexdigest()
 
     with TestClient(application) as client:
@@ -327,3 +394,8 @@ def test_card_action_route_reuses_lark_verification_and_returns_feedback(config)
     assert response.status_code == 200
     assert response.json()["toast"]["content"] == "已提交重新评分"
     assert len(app_runtime.coordinator.calls) == 1
+    submitted = app_runtime.coordinator.calls[0]
+    assert submitted["key"] == RecordKey("app", "table", "record")
+    assert submitted["source"] is TriggerSource.USER_RESCORE
+    assert submitted["actor_open_id"] == "ou_submitter"
+    assert submitted["callback_id"]

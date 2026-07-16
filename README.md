@@ -90,6 +90,8 @@ cp .env.example .env
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
+| `需求标题` | 单行文本 | 需求的可读名称，用于评分任务日志标识 |
+| `是否RPA` | 单选/文本 | 只有值为`是`的记录才允许进入评分流程 |
 | `提报人` | 人员 | 收集表单自动填充，用于定向通知 |
 | `原始描述` | 多行文本 | 用户输入的文本内容 |
 | `需求文档` | 超链接 | 飞书在线文档链接（docx / docs / wiki） |
@@ -121,7 +123,12 @@ ngrok http 8000
 1. 飞书开放平台 → 你的应用 → **事件订阅**
 2. 请求 URL 填 `https://<你的域名>/webhook/event`（SDK 会自动完成 challenge 校验）
 3. 添加事件：`drive.file.bitable_record_changed_v1`
-4. 发布应用版本
+4. 将消息卡片交互回调 URL 配为 `https://<你的域名>/webhook/card-action`
+5. 发布应用版本
+
+卡片按钮使用 P2 `card.action.trigger` 回调。服务通过事件分发器按
+`WEBHOOK_ENCRYPT_KEY` 校验 SHA-256 签名并解密请求，不使用旧版卡片回调的
+Verification Token + SHA-1 协议。
 
 项目锁定 `lark-oapi==1.7.1`。该版本使用
 `register_p2_drive_file_bitable_record_changed_v1` 注册普通事件；运行时代码也会在
@@ -210,7 +217,7 @@ client.drive.v1.file.subscribe(req)
 ```
 
 > [!IMPORTANT]
-> Bitable 普通事件只有在状态为 `待评分` 时才申请评分。`未通过` 下的文本、附件和在线文档编辑都不会自动触发；用户必须点击卡片按钮。系统写回事件靠状态门控忽略，不使用内容指纹。
+> 所有触发来源都会先检查 `是否RPA`，只有值为`是`时才允许评分。Bitable 普通事件还要求状态为 `待评分`；`未通过` 下的文本、附件和在线文档编辑都不会自动触发，用户必须点击卡片按钮。系统写回事件靠状态门控忽略，不使用内容指纹。
 
 ## Docker 部署
 
@@ -318,5 +325,10 @@ https://<Host() 中填的域名>/webhook/event
 - **附件下载失败** — 有 `file_token` 时通过 Drive Media SDK 下载；只有 URL 兜底才会校验 HTTPS/域名并附带 tenant token。
 - **wiki 链接导出失败** — wiki 链接里的 token 是知识库节点 token，需先经 Wiki API 解析出挂载文档的真实 `obj_token`，否则报 file token invalid。
 - **日期字段写入报错** — 多维表格日期字段要求**毫秒级 Unix 时间戳（int）**，而非 ISO 8601 字符串。
+- **大量 `GET /.env 404`** — 这是公网自动扫描器在探测是否错误暴露了环境变量文件。返回 404 表示当前应用没有泄露该文件；这类 4xx/5xx 异常访问日志会保留，便于发现扫描。可在 Traefik、Nginx 或 WAF 层进一步封禁点文件路径和做限流。
+
+成功的 `GET /` 健康检查及 `POST /webhook/event`、`POST /webhook/card-action`
+访问日志会被过滤；失败请求仍保留。评分任务日志会记录 `需求标题`、记录 ID、
+触发来源、fence 和执行耗时；标题为空时使用记录 ID 兜底。
 
 更多工程细节见 [`CLAUDE.md`](./CLAUDE.md)。

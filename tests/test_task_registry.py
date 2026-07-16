@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
@@ -10,7 +11,8 @@ from tests.fakes import FakeClock
 
 
 @pytest.mark.asyncio
-async def test_registry_tracks_state_fence_and_removes_completed_task() -> None:
+async def test_registry_tracks_state_fence_and_removes_completed_task(caplog) -> None:
+    caplog.set_level(logging.INFO, logger="app.task_registry")
     clock = FakeClock()
     registry = TaskRegistry(clock=clock.monotonic)
     key = RecordKey("app", "table", "record")
@@ -26,6 +28,7 @@ async def test_registry_tracks_state_fence_and_removes_completed_task() -> None:
         key=key,
         source=TriggerSource.INITIAL_EVENT,
         runner=runner,
+        requirement_title="支付审批需求",
     )
     assert result.status is SubmitStatus.ACCEPTED
     assert result.command and result.command.fence == 1
@@ -50,6 +53,23 @@ async def test_registry_tracks_state_fence_and_removes_completed_task() -> None:
 
     assert not registry.has_active(key)
     assert registry.history[0].state is TaskState.COMPLETED
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        '评分任务已接收: 需求标题="支付审批需求" record_id=record'
+        in message
+        for message in messages
+    )
+    assert any(
+        '评分任务已开始: 需求标题="支付审批需求" record_id=record'
+        in message
+        for message in messages
+    )
+    assert any(
+        '评分任务已完成: 需求标题="支付审批需求" record_id=record'
+        in message
+        and "duration=" in message
+        for message in messages
+    )
 
 
 @pytest.mark.asyncio

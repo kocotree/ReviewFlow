@@ -12,8 +12,6 @@ from typing import Any, Callable
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
-from lark_oapi.card.action_handler import CardActionHandler
-from lark_oapi.card.model import Card
 from lark_oapi.core.model import RawRequest, RawResponse
 from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
 
@@ -39,7 +37,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class _HealthCheckLogFilter(logging.Filter):
+class _RoutineAccessLogFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         args = record.args
         if isinstance(args, tuple) and len(args) >= 5:
@@ -48,12 +46,19 @@ class _HealthCheckLogFilter(logging.Filter):
                 ok = int(status) < 400
             except (TypeError, ValueError):
                 ok = False
-            if method == "GET" and path == "/" and ok:
+            route = str(path).split("?", 1)[0]
+            routine_success = (
+                method == "GET" and route == "/"
+            ) or (
+                method == "POST"
+                and route in {"/webhook/event", "/webhook/card-action"}
+            )
+            if ok and routine_success:
                 return False
         return True
 
 
-logging.getLogger("uvicorn.access").addFilter(_HealthCheckLogFilter())
+logging.getLogger("uvicorn.access").addFilter(_RoutineAccessLogFilter())
 
 
 class EventDeduplicator:
@@ -97,7 +102,7 @@ class AppRuntime:
     supervisor: BackgroundTaskSupervisor
     event_deduplicator: EventDeduplicator
     event_handler: EventDispatcherHandler | None = None
-    card_handler: CardActionHandler | None = None
+    card_handler: EventDispatcherHandler | None = None
     card_service: CardActionService | None = None
     scavenger: ScoringScavenger | None = None
     scavenger_stop: asyncio.Event | None = None
@@ -251,20 +256,24 @@ def _build_event_handler(config: Config, runtime: AppRuntime) -> EventDispatcher
     return builder.build()
 
 
-def _build_card_handler(config: Config) -> CardActionHandler:
-    def decode(card: Card) -> dict[str, Any]:
+def _build_card_handler(config: Config) -> EventDispatcherHandler:
+    def decode(data: Any) -> dict[str, Any]:
+        event = data.event
+        operator = event.operator
+        context = event.context
+        action = event.action
         return {
             "_decoded_card_action": True,
-            "actor_open_id": card.open_id or "",
-            "open_message_id": card.open_message_id or "",
-            "open_chat_id": card.open_chat_id or "",
-            "action_value": card.action.value if card.action else {},
+            "actor_open_id": operator.open_id if operator else "",
+            "open_message_id": context.open_message_id if context else "",
+            "open_chat_id": context.open_chat_id if context else "",
+            "action_value": action.value if action else {},
         }
 
-    return CardActionHandler.builder(
+    return EventDispatcherHandler.builder(
         encrypt_key=config.webhook_encrypt_key,
         verification_token=config.webhook_verification_token,
-    ).register(decode).build()
+    ).register_p2_card_action_trigger(decode).build()
 
 
 def _raw_request(request: Request, body: bytes) -> RawRequest:

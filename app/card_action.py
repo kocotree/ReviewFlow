@@ -112,6 +112,11 @@ class CardActionService:
             return CardActionResponse("正在评分，请勿重复点击", kind="warning")
         if status is RequestStatus.FORBIDDEN:
             return CardActionResponse("只有原提报人可以重新评分", kind="error", status_code=403)
+        if status is RequestStatus.NOT_RPA:
+            return CardActionResponse(
+                "该记录的“是否RPA”不是“是”，不触发评分",
+                kind="warning",
+            )
         if status is RequestStatus.NOT_TRIGGERABLE:
             return CardActionResponse("当前记录状态不可重新评分", kind="warning", status_code=409)
         if status is RequestStatus.RECORD_NOT_FOUND:

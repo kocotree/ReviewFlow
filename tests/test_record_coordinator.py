@@ -9,6 +9,8 @@ from app.record_coordinator import (
     RecordCoordinator,
     RequestStatus,
     derive_callback_id,
+    extract_requirement_title,
+    is_rpa_enabled,
 )
 from app.task_registry import RecordKey, TaskRegistry
 from app.workflow_state import TriggerSource
@@ -19,9 +21,11 @@ from tests.fakes import FakeFeishuClient
 async def test_initial_event_only_accepts_pending_record(record_factory) -> None:
     pending_key = RecordKey("app", "table", "pending")
     failed_key = RecordKey("app", "table", "failed")
+    pending_fields = record_factory(status="待评分")
+    pending_fields["需求标题"] = [{"text": "支付审批需求\n第二期"}]
     feishu = FakeFeishuClient(
         {
-            ("app", "table", "pending"): record_factory(status="待评分"),
+            ("app", "table", "pending"): pending_fields,
             ("app", "table", "failed"): record_factory(status="未通过"),
         }
     )
@@ -41,9 +45,56 @@ async def test_initial_event_only_accepts_pending_record(record_factory) -> None
     )
 
     assert accepted.status is RequestStatus.ACCEPTED
+    assert accepted.command
+    assert accepted.command.requirement_title == "支付审批需求 第二期"
     assert ignored.status is RequestStatus.NOT_TRIGGERABLE
     release.set()
     await registry.drain(1)
+
+
+def test_requirement_title_falls_back_to_record_id(record_factory) -> None:
+    fields = record_factory()
+
+    assert extract_requirement_title(fields, "record") == "record"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("是", True),
+        (True, True),
+        (["是"], True),
+        ({"text": "是"}, True),
+        ("否", False),
+        (False, False),
+        (None, False),
+        ("", False),
+    ],
+)
+def test_rpa_gate_accepts_only_explicit_yes(value, expected) -> None:
+    assert is_rpa_enabled(value) is expected
+
+
+@pytest.mark.asyncio
+async def test_non_rpa_record_never_enters_scoring(record_factory) -> None:
+    key = RecordKey("app", "table", "record")
+    feishu = FakeFeishuClient(
+        {("app", "table", "record"): record_factory(is_rpa="否")}
+    )
+    registry = TaskRegistry()
+
+    async def runner(command):
+        raise AssertionError("非 RPA 记录不可启动评分")
+
+    coordinator = RecordCoordinator(feishu=feishu, registry=registry, runner=runner)
+
+    result = await coordinator.request_score(
+        key=key,
+        source=TriggerSource.INITIAL_EVENT,
+    )
+
+    assert result.status is RequestStatus.NOT_RPA
+    assert registry.active_count == 0
 
 
 @pytest.mark.asyncio

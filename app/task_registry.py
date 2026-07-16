@@ -38,6 +38,7 @@ class ScoreCommand:
     requested_at: float
     actor_open_id: str = ""
     callback_id: str = ""
+    requirement_title: str = ""
 
 
 @dataclass
@@ -119,6 +120,7 @@ class TaskRegistry:
         runner: TaskRunner,
         actor_open_id: str = "",
         callback_id: str = "",
+        requirement_title: str = "",
     ) -> SubmitResult:
         """注册并启动任务；同一完整记录键只允许一个在岗任务。"""
         if not self._accepting:
@@ -135,13 +137,16 @@ class TaskRegistry:
             requested_at=self._clock(),
             actor_open_id=actor_open_id,
             callback_id=callback_id,
+            requirement_title=requirement_title,
         )
         entry = TaskEntry(command=command)
         self._active[key] = entry
         self._history.append(entry)
         logger.info(
-            "评分任务已接收: key=%s source=%s fence=%d",
-            key,
+            "评分任务已接收: 需求标题=\"%s\" record_id=%s "
+            "source=%s fence=%d",
+            command.requirement_title or key.record_id,
+            key.record_id,
             source,
             fence,
         )
@@ -156,8 +161,10 @@ class TaskRegistry:
         entry.state = TaskState.STARTED
         entry.started_at = self._clock()
         logger.info(
-            "评分任务已开始: key=%s source=%s fence=%d",
-            entry.command.key,
+            "评分任务已开始: 需求标题=\"%s\" record_id=%s "
+            "source=%s fence=%d",
+            entry.command.requirement_title or entry.command.key.record_id,
+            entry.command.key.record_id,
             entry.command.source,
             entry.command.fence,
         )
@@ -168,8 +175,10 @@ class TaskRegistry:
         except BaseException as exc:
             entry.error = exc
             logger.exception(
-                "评分后台任务异常: key=%s fence=%d",
-                entry.command.key,
+                "评分后台任务异常: 需求标题=\"%s\" record_id=%s "
+                "fence=%d",
+                entry.command.requirement_title or entry.command.key.record_id,
+                entry.command.key.record_id,
                 entry.command.fence,
             )
         finally:
@@ -178,11 +187,20 @@ class TaskRegistry:
             current = self._active.get(entry.command.key)
             if current is entry:
                 self._active.pop(entry.command.key, None)
+            started_at = (
+                entry.started_at
+                if entry.started_at is not None
+                else entry.completed_at
+            )
+            duration = max(0.0, entry.completed_at - started_at)
             logger.info(
-                "评分任务已完成: key=%s source=%s fence=%d",
-                entry.command.key,
+                "评分任务已完成: 需求标题=\"%s\" record_id=%s "
+                "source=%s fence=%d duration=%.2fs",
+                entry.command.requirement_title or entry.command.key.record_id,
+                entry.command.key.record_id,
                 entry.command.source,
                 entry.command.fence,
+                duration,
             )
 
     def stop_accepting(self) -> None:
