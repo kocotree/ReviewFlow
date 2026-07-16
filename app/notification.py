@@ -14,6 +14,7 @@ from typing import Any
 
 from app.config import Config
 from app.feishu import FeishuClient
+from app.send_circuit_breaker import SendCircuitBreaker
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,13 @@ class NotificationManager:
         )
     """
 
-    def __init__(self, config: Config, feishu: FeishuClient) -> None:
+    def __init__(
+        self,
+        config: Config,
+        feishu: FeishuClient,
+        *,
+        send_circuit_breaker: SendCircuitBreaker | None = None,
+    ) -> None:
         self._config = config
         self._feishu = feishu
 
@@ -48,6 +55,67 @@ class NotificationManager:
         # 群告警冷却记录（独立于用户通知）
         # {record_id: 最近群告警时间戳}
         self._group_last_notify: dict[str, float] = {}
+
+        self._send_circuit_breaker = send_circuit_breaker or SendCircuitBreaker(
+            window_seconds=config.send_circuit_breaker_window_minutes * 60,
+            max_messages=config.send_circuit_breaker_max_messages,
+        )
+
+    async def _send_card(
+        self,
+        *,
+        record_id: str,
+        receive_id: str,
+        card: dict[str, Any],
+        receive_id_type: str = "open_id",
+    ) -> bool:
+        """经记录级发送熔断器发送卡片。"""
+        permit = self._send_circuit_breaker.acquire(record_id)
+        if not permit.allowed:
+            logger.critical(
+                "卡片发送熔断: record=%s count=%d window=%ds",
+                record_id,
+                permit.count,
+                int(self._send_circuit_breaker.window_seconds),
+            )
+            if permit.should_alert:
+                await self._notify_circuit_breaker_to_group(record_id, permit.count)
+            return False
+
+        try:
+            success = await self._feishu.send_card_message(
+                receive_id,
+                card,
+                receive_id_type=receive_id_type,
+            )
+        except Exception:
+            self._send_circuit_breaker.rollback(record_id, permit.reservation_id)
+            raise
+        if not success:
+            self._send_circuit_breaker.rollback(record_id, permit.reservation_id)
+        return success
+
+    async def _notify_circuit_breaker_to_group(
+        self,
+        record_id: str,
+        observed_count: int,
+    ) -> bool:
+        """熔断首次触发时直发一次管理员告警；绕过熔断避免递归。"""
+        chat_id = self._config.notification_group_chat_id
+        if not chat_id:
+            logger.error("卡片发送熔断已触发，但未配置管理员告警群")
+            return False
+        card = _build_circuit_breaker_card(
+            record_id=record_id,
+            observed_count=observed_count,
+            window_minutes=self._config.send_circuit_breaker_window_minutes,
+            max_messages=self._config.send_circuit_breaker_max_messages,
+        )
+        return await self._feishu.send_card_message(
+            chat_id,
+            card,
+            receive_id_type="chat_id",
+        )
 
     def can_notify(self, record_id: str, open_id: str) -> bool:
         """检查是否允许发送通知。
@@ -121,7 +189,9 @@ class NotificationManager:
             )
 
         card = _build_failed_card(score, detail, threshold, record_url)
-        success = await self._feishu.send_card_message(open_id, card)
+        success = await self._send_card(
+            record_id=record_id, receive_id=open_id, card=card
+        )
 
         if success:
             self.record_notification(record_id, open_id)
@@ -147,7 +217,9 @@ class NotificationManager:
         二者皆空时退回「仅展示分数」的精简卡片。
         """
         card = _build_passed_card(score, threshold, highlights, improvements)
-        success = await self._feishu.send_card_message(open_id, card)
+        success = await self._send_card(
+            record_id=record_id, receive_id=open_id, card=card
+        )
         if success:
             logger.info(
                 "发送通过通知: user=%s record=%s score=%d",
@@ -166,14 +238,20 @@ class NotificationManager:
     ) -> bool:
         """发送"已驳回"通知（超过最大修改轮次）。"""
         card = _build_rejected_card(score, detail, rounds)
-        success = await self._feishu.send_card_message(open_id, card)
+        success = await self._send_card(
+            record_id=record_id, receive_id=open_id, card=card
+        )
 
         # 同时通知管理员（如果配置了）
         if admin_open_id:
             admin_card = _build_admin_rejected_card(
                 open_id, record_id, score, detail, rounds
             )
-            await self._feishu.send_card_message(admin_open_id, admin_card)
+            await self._send_card(
+                record_id=record_id,
+                receive_id=admin_open_id,
+                card=admin_card,
+            )
 
         return success
 
@@ -191,7 +269,9 @@ class NotificationManager:
             return False
 
         card = _build_format_unsupported_card(unsupported_files)
-        success = await self._feishu.send_card_message(open_id, card)
+        success = await self._send_card(
+            record_id=record_id, receive_id=open_id, card=card
+        )
 
         if success:
             self.record_notification(record_id, open_id)
@@ -217,7 +297,9 @@ class NotificationManager:
             return False
 
         card = _build_unprocessable_card(reason)
-        success = await self._feishu.send_card_message(open_id, card)
+        success = await self._send_card(
+            record_id=record_id, receive_id=open_id, card=card
+        )
 
         if success:
             self.record_notification(record_id, open_id)
@@ -254,8 +336,11 @@ class NotificationManager:
             return False
 
         card = _build_error_card(record_id, error, record_url)
-        success = await self._feishu.send_card_message(
-            chat_id, card, receive_id_type="chat_id"
+        success = await self._send_card(
+            record_id=record_id,
+            receive_id=chat_id,
+            card=card,
+            receive_id_type="chat_id",
         )
 
         if success:
@@ -556,4 +641,36 @@ def _build_error_card(
             "template": "red",
         },
         "elements": elements,
+    }
+
+
+def _build_circuit_breaker_card(
+    *,
+    record_id: str,
+    observed_count: int,
+    window_minutes: int,
+    max_messages: int,
+) -> dict[str, Any]:
+    """构建发送侧熔断管理员告警卡片。"""
+    return {
+        "header": {
+            "title": {
+                "tag": "plain_text",
+                "content": "🚨 卡片发送回路已熔断",
+            },
+            "template": "red",
+        },
+        "elements": [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        f"记录 **{record_id}** 在 {window_minutes} 分钟窗口内已发送 "
+                        f"{observed_count} 张卡片（上限 {max_messages}），后续卡片已停发。\n\n"
+                        "该保护只作用于发送侧，请检查事件回声或状态机循环。"
+                    ),
+                },
+            }
+        ],
     }

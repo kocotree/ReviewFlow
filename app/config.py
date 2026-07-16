@@ -92,6 +92,17 @@ class Config:
     notification_group_chat_id: str = field(
         default_factory=lambda: os.getenv("NOTIFICATION_GROUP_CHAT_ID", "")
     )
+    # 发送侧熔断：同一记录在滑动窗口内最多允许发送的卡片数。
+    send_circuit_breaker_window_minutes: int = field(
+        default_factory=lambda: int(
+            os.getenv("SEND_CIRCUIT_BREAKER_WINDOW_MINUTES", "5")
+        )
+    )
+    send_circuit_breaker_max_messages: int = field(
+        default_factory=lambda: int(
+            os.getenv("SEND_CIRCUIT_BREAKER_MAX_MESSAGES", "20")
+        )
+    )
 
     # ---- 服务配置 ----
     host: str = field(
