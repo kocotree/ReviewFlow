@@ -35,6 +35,7 @@ def build_failed_card(
     threshold: int,
     record_url: str,
     action_value: dict[str, str] | None,
+    requirement_title: str = "",
 ) -> dict[str, Any]:
     elements: list[dict[str, Any]] = [
         markdown(
@@ -47,6 +48,7 @@ def build_failed_card(
             f"**改进建议**:\n{detail}"
         ),
     ]
+    elements = with_requirement_title(elements, requirement_title)
     action = action_element(record_url=record_url, action_value=action_value)
     if action:
         elements.append(action)
@@ -58,6 +60,8 @@ def build_passed_card(
     threshold: int,
     highlights: str,
     improvements: str,
+    *,
+    requirement_title: str = "",
 ) -> dict[str, Any]:
     elements = [
         markdown(
@@ -68,20 +72,28 @@ def build_passed_card(
         elements.append(markdown(f"**✨ 做得好的地方**:\n{highlights.strip()}"))
     if improvements.strip():
         elements.append(markdown(f"**🚀 还可以更好**:\n{improvements.strip()}"))
+    elements = with_requirement_title(elements, requirement_title)
     return card("✅ AI 评审已通过", "green", elements)
 
 
-def build_rejected_card(score: int, detail: str, rounds: int) -> dict[str, Any]:
+def build_rejected_card(
+    score: int,
+    detail: str,
+    rounds: int,
+    *,
+    requirement_title: str = "",
+) -> dict[str, Any]:
+    elements = [
+        markdown(
+            f"本次为第 **{rounds}** 次修改，已达到上限并立即驳回。\n\n"
+            f"**最终评分**: {score} 分\n**评审意见**: {detail}\n\n"
+            "请联系开发者或管理员获取帮助。"
+        )
+    ]
     return card(
         "🚫 已达到修改上限",
         "red",
-        [
-            markdown(
-                f"本次为第 **{rounds}** 次修改，已达到上限并立即驳回。\n\n"
-                f"**最终评分**: {score} 分\n**评审意见**: {detail}\n\n"
-                "请联系开发者或管理员获取帮助。"
-            )
-        ],
+        with_requirement_title(elements, requirement_title),
     )
 
 
@@ -92,6 +104,7 @@ def build_material_error_card(
     problems: list[tuple[str, str]],
     record_url: str,
     action_value: dict[str, str] | None,
+    requirement_title: str = "",
 ) -> dict[str, Any]:
     titles = {
         "no_file": "⚠️ 请上传需求文档",
@@ -111,7 +124,7 @@ def build_material_error_card(
         content += "\n\n**问题材料**:\n" + "\n".join(lines)
     elif reason:
         content += f"\n\n**原因**: {reason}"
-    elements = [markdown(content)]
+    elements = with_requirement_title([markdown(content)], requirement_title)
     action = action_element(record_url=record_url, action_value=action_value)
     if action:
         elements.append(action)
@@ -123,6 +136,8 @@ def build_error_card(
     error: str,
     record_url: str,
     action_value: dict[str, str] | None,
+    *,
+    requirement_title: str = "",
 ) -> dict[str, Any]:
     elements = [
         markdown(
@@ -130,6 +145,7 @@ def build_error_card(
             f"**记录 ID**: {record_id}\n**错误信息**: {error}"
         )
     ]
+    elements = with_requirement_title(elements, requirement_title)
     action = action_element(
         record_url=record_url,
         action_value=action_value,
@@ -143,20 +159,22 @@ def build_error_card(
 def build_circuit_breaker_card(
     *,
     record_id: str,
+    requirement_title: str = "",
     observed_count: int,
     window_minutes: int,
     max_messages: int,
 ) -> dict[str, Any]:
+    elements = [
+        markdown(
+            f"记录 **{record_id}** 在 {window_minutes} 分钟窗口内已发送 "
+            f"{observed_count} 张卡片（上限 {max_messages}），后续卡片已停发。\n\n"
+            "该保护只作用于发送侧，请检查事件回声或状态机循环。"
+        )
+    ]
     return card(
         "🚨 卡片发送回路已熔断",
         "red",
-        [
-            markdown(
-                f"记录 **{record_id}** 在 {window_minutes} 分钟窗口内已发送 "
-                f"{observed_count} 张卡片（上限 {max_messages}），后续卡片已停发。\n\n"
-                "该保护只作用于发送侧，请检查事件回声或状态机循环。"
-            )
-        ],
+        with_requirement_title(elements, requirement_title),
     )
 
 
@@ -190,6 +208,16 @@ def action_element(
 
 def markdown(content: str) -> dict[str, Any]:
     return {"tag": "div", "text": {"tag": "lark_md", "content": content}}
+
+
+def with_requirement_title(
+    elements: list[dict[str, Any]],
+    requirement_title: str,
+) -> list[dict[str, Any]]:
+    title = " ".join(str(requirement_title or "").split())
+    if not title:
+        return elements
+    return [markdown(f"**需求标题**：{title}"), {"tag": "hr"}, *elements]
 
 
 def card(title: str, template: str, elements: list[dict[str, Any]]) -> dict[str, Any]:

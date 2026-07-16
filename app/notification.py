@@ -46,6 +46,7 @@ class NotificationManager:
         record_id: str,
         receive_id: str,
         card: dict[str, Any],
+        requirement_title: str = "",
         receive_id_type: str = "open_id",
     ) -> bool:
         permit = self._send_circuit_breaker.acquire(record_id)
@@ -57,7 +58,11 @@ class NotificationManager:
                 int(self._send_circuit_breaker.window_seconds),
             )
             if permit.should_alert:
-                await self._notify_circuit_breaker_to_group(record_id, permit.count)
+                await self._notify_circuit_breaker_to_group(
+                    record_id,
+                    permit.count,
+                    requirement_title,
+                )
             return False
         try:
             success = await self._feishu.send_card_message(
@@ -76,6 +81,7 @@ class NotificationManager:
         self,
         record_id: str,
         observed_count: int,
+        requirement_title: str,
     ) -> bool:
         chat_id = self._config.notification_group_chat_id
         if not chat_id:
@@ -85,6 +91,7 @@ class NotificationManager:
             chat_id,
             build_circuit_breaker_card(
                 record_id=record_id,
+                requirement_title=requirement_title,
                 observed_count=observed_count,
                 window_minutes=self._config.send_circuit_breaker_window_minutes,
                 max_messages=self._config.send_circuit_breaker_max_messages,
@@ -100,6 +107,7 @@ class NotificationManager:
         score: int,
         detail: str,
         threshold: int,
+        requirement_title: str = "",
         base_url: str = "",
         app_token: str = "",
         table_id: str = "",
@@ -113,10 +121,12 @@ class NotificationManager:
         return await self._send_card(
             record_id=record_id,
             receive_id=open_id,
+            requirement_title=requirement_title,
             card=build_failed_card(
                 score=score,
                 detail=detail,
                 threshold=threshold,
+                requirement_title=requirement_title,
                 record_url=record_url(base_url, app_token, table_id, record_id),
                 action_value=action_value if show_rescore else None,
             ),
@@ -129,6 +139,7 @@ class NotificationManager:
         record_id: str,
         score: int,
         threshold: int,
+        requirement_title: str = "",
         highlights: str = "",
         improvements: str = "",
         **_: Any,
@@ -136,7 +147,14 @@ class NotificationManager:
         return await self._send_card(
             record_id=record_id,
             receive_id=open_id,
-            card=build_passed_card(score, threshold, highlights, improvements),
+            requirement_title=requirement_title,
+            card=build_passed_card(
+                score,
+                threshold,
+                highlights,
+                improvements,
+                requirement_title=requirement_title,
+            ),
         )
 
     async def notify_rejected(
@@ -147,12 +165,19 @@ class NotificationManager:
         score: int,
         detail: str,
         rounds: int,
+        requirement_title: str = "",
         **_: Any,
     ) -> bool:
         return await self._send_card(
             record_id=record_id,
             receive_id=open_id,
-            card=build_rejected_card(score, detail, rounds),
+            requirement_title=requirement_title,
+            card=build_rejected_card(
+                score,
+                detail,
+                rounds,
+                requirement_title=requirement_title,
+            ),
         )
 
     async def notify_material_error(
@@ -162,6 +187,7 @@ class NotificationManager:
         record_id: str,
         kind: str,
         reason: str,
+        requirement_title: str = "",
         problems: Iterable[Any] = (),
         app_token: str = "",
         table_id: str = "",
@@ -177,9 +203,11 @@ class NotificationManager:
         return await self._send_card(
             record_id=record_id,
             receive_id=open_id,
+            requirement_title=requirement_title,
             card=build_material_error_card(
                 kind=kind,
                 reason=reason,
+                requirement_title=requirement_title,
                 problems=normalized,
                 record_url=record_url(base_url, app_token, table_id, record_id),
                 action_value=rescore_value(app_token, table_id, record_id),
@@ -225,6 +253,7 @@ class NotificationManager:
         *,
         record_id: str,
         error: str,
+        requirement_title: str = "",
         record_url: str = "",
         app_token: str = "",
         table_id: str = "",
@@ -245,6 +274,13 @@ class NotificationManager:
         return await self._send_card(
             record_id=record_id,
             receive_id=chat_id,
+            requirement_title=requirement_title,
             receive_id_type="chat_id",
-            card=build_error_card(record_id, error, record_url, action_value),
+            card=build_error_card(
+                record_id,
+                error,
+                record_url,
+                action_value,
+                requirement_title=requirement_title,
+            ),
         )

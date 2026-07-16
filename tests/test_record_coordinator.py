@@ -53,7 +53,7 @@ async def test_initial_event_only_accepts_pending_record(record_factory) -> None
 
 
 def test_requirement_title_falls_back_to_record_id(record_factory) -> None:
-    fields = record_factory()
+    fields = record_factory(requirement_title=None)
 
     assert extract_requirement_title(fields, "record") == "record"
 

@@ -64,7 +64,9 @@ pdfminer-six==20260107
 pdfplumber==0.11.10
     # via -r requirements.txt
 pillow==12.3.0
-    # via pdfplumber
+    # via
+    #   -r requirements.txt
+    #   pdfplumber
 pluggy==1.6.0
     # via pytest
 pycparser==3.0

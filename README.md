@@ -45,7 +45,7 @@
 | `app/content_collector.py` / `app/pdf_bundle.py` | 多链接解析、稳定去重、附件转换/校验、来源分隔页和总 PDF |
 | `app/ai.py` | 豆包总 PDF 转写与综合评分、严格 Pydantic 响应校验 |
 | `app/feishu.py` | 类型化异步网关：记录、Wiki、PDF 导出、消息、附件与清道夫查询 |
-| `app/docx_convert.py` | PDF 直通及 Word/文本/Markdown/图片的 LibreOffice 转 PDF |
+| `app/docx_convert.py` | PDF 直通、图片经 Pillow 转 PDF，Word/文本/Markdown 经 LibreOffice 转 PDF |
 | `app/notification.py` / `app/card_templates.py` | 通知策略、卡片模板、重评动作与发送侧熔断 |
 | `app/scavenger.py` | 按系统 `last_modified_time` 恢复超时且无内存活任务的“评分中”记录 |
 | `app/config.py` | 环境变量集中定义与校验，`get_config()` 缓存单例 |
@@ -56,7 +56,7 @@
 ### 环境要求
 
 - Python 3.12+
-- LibreOffice（必需，用于所有来源分隔页以及 Word/文本/Markdown/图片转 PDF；容器镜像已内置）
+- LibreOffice（必需，用于所有来源分隔页以及 Word/文本/Markdown 转 PDF；图片由 Pillow 转 PDF，容器镜像已内置全部依赖）
 - [飞书企业自建应用](https://open.feishu.cn/app)，并开通以下权限：
 
 | 权限 | 用途 |
@@ -287,6 +287,8 @@ https://<Host() 中填的域名>/webhook/event
 | 评分异常 | 管理员群 | “重试评分”，提交人不收技术异常卡片 |
 
 所有卡片只使用记录级发送熔断；不设置用户冷却或每日上限。
+通过、未通过、驳回、材料异常、管理员异常及熔断告警卡片都会显示当前记录的
+`需求标题`，便于用户和管理员定位对应需求。
 
 ## 项目结构
 
@@ -322,7 +324,7 @@ https://<Host() 中填的域名>/webhook/event
 - **事件收不到** — 除了在控制台加事件类型，务必调用一次[订阅 API](#6-订阅多维表格必须的一步)。
 - **事件里没有 `record_id`** — `record_changed` 事件的 record_id 在 `event.action_list[i].record_id`，且一个事件可含多条记录动作。
 - **签名校验失败** — FastAPI 会把请求头统一转小写，而 SDK 期望 `X-Lark-Request-Timestamp` 等混合大小写，需手动还原（`main.py` 已处理）。
-- **附件下载失败** — 有 `file_token` 时通过 Drive Media SDK 下载；只有 URL 兜底才会校验 HTTPS/域名并附带 tenant token。
+- **附件下载失败** — 有 `file_token` 时优先通过 Drive Media SDK 下载；部分多维表附件 token 会被该接口以 HTTP 400 拒绝，此时才对记录中的临时 URL 做 HTTPS/域名白名单校验并附带 tenant token 安全兜底。大小超限不会走兜底。
 - **wiki 链接导出失败** — wiki 链接里的 token 是知识库节点 token，需先经 Wiki API 解析出挂载文档的真实 `obj_token`，否则报 file token invalid。
 - **日期字段写入报错** — 多维表格日期字段要求**毫秒级 Unix 时间戳（int）**，而非 ISO 8601 字符串。
 - **大量 `GET /.env 404`** — 这是公网自动扫描器在探测是否错误暴露了环境变量文件。返回 404 表示当前应用没有泄露该文件；这类 4xx/5xx 异常访问日志会保留，便于发现扫描。可在 Traefik、Nginx 或 WAF 层进一步封禁点文件路径和做限流。

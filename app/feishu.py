@@ -806,43 +806,28 @@ class FeishuClient:
         file_token: str = "",
         max_bytes: int | None = None,
     ) -> bytes:
-        """优先用 Drive Media SDK 下载；无 token 时才使用安全 URL 兜底。"""
+        """优先用 Drive Media SDK；失败且有 URL 时经过安全校验后兜底。"""
 
         self._ensure_open()
         if file_token:
-            request = DownloadMediaRequest.builder().file_token(file_token).build()
-            response = await self._sdk_call(
-                "download_attachment",
-                lambda: self._client.drive.v1.media.download(request),
-                resource_id=file_token,
-                document_level=True,
-            )
-            self._checked_response(
-                response,
-                operation="download_attachment",
-                resource_id=file_token,
-                document_level=True,
-            )
-            file = getattr(response, "file", None)
-            if file is None:
-                raise FeishuProtocolError(
-                    "附件下载响应缺少文件流",
-                    operation="download_attachment",
-                    resource_id=file_token,
+            try:
+                return await self._download_attachment_via_sdk(
+                    file_token,
+                    max_bytes=max_bytes,
                 )
-            data = await self._sdk_call(
-                "read_attachment_file",
-                file.read,
-                resource_id=file_token,
-                document_level=True,
-            )
-            if max_bytes is not None and len(data) > max_bytes:
-                raise FeishuMaterialError(
-                    "附件大小超过允许上限",
-                    operation="download_attachment",
-                    resource_id=file_token,
+            except FeishuError as exc:
+                size_limit = isinstance(exc, FeishuMaterialError) and "大小超过" in str(
+                    exc
                 )
-            return data
+                if not url or size_limit:
+                    raise
+                logger.warning(
+                    "附件 SDK 下载失败，改用安全 URL 兜底: error_type=%s "
+                    "code=%s status=%s",
+                    type(exc).__name__,
+                    exc.code,
+                    exc.status_code,
+                )
 
         host = self._validate_attachment_url(url)
         token = await self._sdk_call(
@@ -899,6 +884,52 @@ class FeishuClient:
                 operation="download_attachment",
                 resource_id=host,
             ) from exc
+
+    async def _download_attachment_via_sdk(
+        self,
+        file_token: str,
+        *,
+        max_bytes: int | None,
+    ) -> bytes:
+        request = DownloadMediaRequest.builder().file_token(file_token).build()
+        response = await self._sdk_call(
+            "download_attachment",
+            lambda: self._client.drive.v1.media.download(request),
+            resource_id=file_token,
+            document_level=True,
+        )
+        self._checked_response(
+            response,
+            operation="download_attachment",
+            resource_id=file_token,
+            document_level=True,
+        )
+        file = getattr(response, "file", None)
+        if file is None:
+            raise FeishuProtocolError(
+                "附件下载响应缺少文件流",
+                operation="download_attachment",
+                resource_id=file_token,
+            )
+        data = await self._sdk_call(
+            "read_attachment_file",
+            file.read,
+            resource_id=file_token,
+            document_level=True,
+        )
+        if not isinstance(data, (bytes, bytearray)):
+            raise FeishuProtocolError(
+                "附件文件读取结果不是字节内容",
+                operation="read_attachment_file",
+                resource_id=file_token,
+            )
+        if max_bytes is not None and len(data) > max_bytes:
+            raise FeishuMaterialError(
+                "附件大小超过允许上限",
+                operation="download_attachment",
+                resource_id=file_token,
+            )
+        return bytes(data)
 
     def _validate_attachment_url(self, url: str) -> str:
         try:

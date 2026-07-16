@@ -145,6 +145,7 @@ async def test_fixed_execution_order_and_single_final_write(config, record_facto
     assert ai.score_payloads[0].pdf_files[0][0] is bundle
     assert ai.transcribe_payloads[0].text == ""
     assert "补充描述" in ai.score_payloads[0].text
+    assert notifier.notifications[0][1]["requirement_title"] == "测试需求"
 
 
 @pytest.mark.asyncio
@@ -253,6 +254,7 @@ async def test_invalid_ai_response_is_system_error_without_round_or_user_card(
     assert stored[FIELD_SCORE_STATUS] == "评分异常"
     assert stored[FIELD_REVISION_ROUNDS] == 1
     assert [kind for kind, _ in notifier.notifications] == ["admin_error"]
+    assert notifier.notifications[0][1]["requirement_title"] == "测试需求"
 
 
 @pytest.mark.asyncio
@@ -275,6 +277,7 @@ async def test_material_failure_becomes_failed_without_round_or_ai(config, recor
     assert stored[FIELD_REVISION_ROUNDS] == 2
     assert stored[FIELD_DOC_CACHE] == "旧缓存"
     assert [kind for kind, _ in notifier.notifications] == ["material_error"]
+    assert notifier.notifications[0][1]["requirement_title"] == "测试需求"
 
 
 @pytest.mark.asyncio

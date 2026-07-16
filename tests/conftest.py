@@ -10,6 +10,7 @@ from app.field_mapping import (
     FIELD_DOC_CACHE,
     FIELD_DOC_LINK,
     FIELD_IS_RPA,
+    FIELD_REQUIREMENT_TITLE,
     FIELD_REVISION_ROUNDS,
     FIELD_SCORE_STATUS,
     FIELD_SUBMITTER,
@@ -104,9 +105,11 @@ def record_factory():
         cache: str = "",
         submitter: str = "ou_submitter",
         is_rpa: Any = "是",
+        requirement_title: Any = "测试需求",
     ) -> dict[str, Any]:
         return {
             FIELD_IS_RPA: is_rpa,
+            FIELD_REQUIREMENT_TITLE: requirement_title,
             FIELD_SCORE_STATUS: status,
             FIELD_DOC_LINK: docs,
             FIELD_ATTACHMENT: attachments or [],

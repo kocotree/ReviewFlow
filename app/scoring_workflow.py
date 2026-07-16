@@ -20,7 +20,7 @@ from app.field_mapping import (
     FIELD_SUBMITTER,
 )
 from app.parser import truncate_content
-from app.record_coordinator import extract_open_id
+from app.record_coordinator import extract_open_id, extract_requirement_title
 from app.result_writer import ResultWriter
 from app.retry import retry_step
 from app.task_registry import ScoreCommand, TaskRegistry
@@ -89,6 +89,7 @@ class ScoringWorkflow:
             return WorkflowOutcome.RECORD_MISSING
         rounds = self._rounds(fields)
         open_id = extract_open_id(fields.get(FIELD_SUBMITTER))
+        requirement_title = extract_requirement_title(fields, command.key.record_id)
 
         try:
             entered = await self._writer.enter_scoring(command)
@@ -168,6 +169,7 @@ class ScoringWorkflow:
             await self._notify_completed(
                 command=command,
                 open_id=open_id,
+                requirement_title=requirement_title,
                 status=final_status,
                 score=score,
                 detail=result["detail"],
@@ -178,21 +180,22 @@ class ScoringWorkflow:
             return WorkflowOutcome.COMPLETED
         except FinalWriteError as exc:
             logger.error("最终评分写回失败: key=%s error=%s", command.key, exc)
-            await self._notify_admin_error(command, exc)
+            await self._notify_admin_error(command, exc, requirement_title)
             return WorkflowOutcome.FINAL_WRITE_FAILED
         except ReviewFlowError as exc:
             if exc.category is ErrorCategory.USER_FIXABLE:
                 await self._recover_user_material_failure(
                     command=command,
                     open_id=open_id,
+                    requirement_title=requirement_title,
                     error=exc,
                 )
                 return WorkflowOutcome.MATERIAL_FAILED
-            await self._recover_technical_failure(command, exc)
+            await self._recover_technical_failure(command, exc, requirement_title)
             return WorkflowOutcome.TECHNICAL_FAILED
         except Exception as exc:
             logger.exception("评分工作流未分类异常: key=%s", command.key)
-            await self._recover_technical_failure(command, exc)
+            await self._recover_technical_failure(command, exc, requirement_title)
             return WorkflowOutcome.TECHNICAL_FAILED
 
     async def _recover_user_material_failure(
@@ -200,6 +203,7 @@ class ScoringWorkflow:
         *,
         command: ScoreCommand,
         open_id: str,
+        requirement_title: str,
         error: ReviewFlowError,
     ) -> None:
         try:
@@ -213,6 +217,7 @@ class ScoringWorkflow:
         await self._notifier.notify_material_error(
             open_id=open_id,
             record_id=command.key.record_id,
+            requirement_title=requirement_title,
             kind=getattr(error, "notification_kind", "material_error"),
             reason=str(error),
             problems=problems,
@@ -225,20 +230,23 @@ class ScoringWorkflow:
         self,
         command: ScoreCommand,
         error: BaseException,
+        requirement_title: str,
     ) -> None:
         try:
             await self._writer.set_status(command, ScoreStatus.ERROR)
         except ReviewFlowError:
             logger.exception("评分异常状态写回失败: key=%s", command.key)
-        await self._notify_admin_error(command, error)
+        await self._notify_admin_error(command, error, requirement_title)
 
     async def _notify_admin_error(
         self,
         command: ScoreCommand,
         error: BaseException,
+        requirement_title: str,
     ) -> None:
         await self._notifier.notify_error_to_group(
             record_id=command.key.record_id,
+            requirement_title=requirement_title,
             error=str(error),
             record_url=self._record_url(command),
             app_token=command.key.app_token,
@@ -250,6 +258,7 @@ class ScoringWorkflow:
         *,
         command: ScoreCommand,
         open_id: str,
+        requirement_title: str,
         status: ScoreStatus,
         score: int,
         detail: str,
@@ -262,6 +271,7 @@ class ScoringWorkflow:
         common = {
             "open_id": open_id,
             "record_id": command.key.record_id,
+            "requirement_title": requirement_title,
             "app_token": command.key.app_token,
             "table_id": command.key.table_id,
         }

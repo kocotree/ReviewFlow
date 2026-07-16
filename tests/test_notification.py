@@ -28,6 +28,7 @@ async def test_failed_card_has_view_and_rescore_buttons(config) -> None:
         score=60,
         detail="补充验收标准",
         threshold=70,
+        requirement_title="支付审批需求",
         base_url="https://example.feishu.cn",
         app_token="app",
         table_id="table",
@@ -36,6 +37,7 @@ async def test_failed_card_has_view_and_rescore_buttons(config) -> None:
     )
 
     card = feishu.cards[0]["card"]
+    assert "支付审批需求" in str(card)
     card_buttons = buttons(card)
     assert [button["text"]["content"] for button in card_buttons] == [
         "查看并修改",
@@ -80,6 +82,7 @@ async def test_all_fixable_material_cards_include_rescore(kind, config) -> None:
         record_id="record",
         kind=kind,
         reason="请修复材料",
+        requirement_title="材料异常需求",
         problems=(
             MaterialProblem("问题一.pdf", "损坏"),
             MaterialProblem("问题二.zip", "格式不支持"),
@@ -91,6 +94,7 @@ async def test_all_fixable_material_cards_include_rescore(kind, config) -> None:
 
     card = feishu.cards[0]["card"]
     rendered = str(card)
+    assert "材料异常需求" in rendered
     assert "问题一.pdf" in rendered
     assert "问题二.zip" in rendered
     assert any(button["text"]["content"] == "重新评分" for button in buttons(card))
@@ -104,12 +108,15 @@ async def test_admin_error_card_has_retry_action(config) -> None:
     await manager.notify_error_to_group(
         record_id="record",
         error="AI schema invalid",
+        requirement_title="管理员告警需求",
         record_url="https://example.feishu.cn/record",
         app_token="app",
         table_id="table",
     )
 
-    card_buttons = buttons(feishu.cards[0]["card"])
+    card = feishu.cards[0]["card"]
+    assert "管理员告警需求" in str(card)
+    card_buttons = buttons(card)
     retry = next(button for button in card_buttons if button["text"]["content"] == "重试评分")
     assert retry["value"]["action"] == "admin_retry"
     assert feishu.cards[0]["receive_id_type"] == "chat_id"
@@ -126,11 +133,14 @@ async def test_rejected_card_never_contains_rescore_button(config) -> None:
         score=60,
         detail="detail",
         rounds=5,
+        requirement_title="达到上限需求",
         app_token="app",
         table_id="table",
     )
 
-    assert buttons(feishu.cards[0]["card"]) == []
+    card = feishu.cards[0]["card"]
+    assert "达到上限需求" in str(card)
+    assert buttons(card) == []
 
 
 @pytest.mark.asyncio
@@ -146,9 +156,11 @@ async def test_old_business_cooldown_and_daily_cap_are_not_applied(config) -> No
             record_id="record",
             score=score,
             threshold=70,
+            requirement_title="通过需求",
         )
 
     assert len(feishu.cards) == 2
+    assert all("通过需求" in str(item["card"]) for item in feishu.cards)
 
 
 @pytest.mark.asyncio
@@ -167,19 +179,23 @@ async def test_send_circuit_breaker_blocks_and_alerts_group_once(config) -> None
         record_id="record",
         score=80,
         threshold=70,
+        requirement_title="熔断需求",
     )
     assert not await manager.notify_score_passed(
         open_id="ou_user",
         record_id="record",
         score=81,
         threshold=70,
+        requirement_title="熔断需求",
     )
     assert not await manager.notify_score_passed(
         open_id="ou_user",
         record_id="record",
         score=82,
         threshold=70,
+        requirement_title="熔断需求",
     )
 
     assert len(feishu.cards) == 2
     assert feishu.cards[1]["receive_id_type"] == "chat_id"
+    assert "熔断需求" in str(feishu.cards[1]["card"])

@@ -4,9 +4,12 @@ import asyncio
 import subprocess
 import threading
 import time
+from io import BytesIO
 from pathlib import Path
 
 import pytest
+from PIL import Image
+from pypdf import PdfReader
 
 from app import docx_convert
 
@@ -18,13 +21,9 @@ from app import docx_convert
         ("需求.docx", ".docx"),
         ("说明.TXT", ".txt"),
         ("README.md", ".md"),
-        ("原型.PNG", ".png"),
-        ("页面.jpg", ".jpg"),
-        ("页面.JPEG", ".jpeg"),
-        ("页面.webp", ".webp"),
     ],
 )
-async def test_supported_extension_is_preserved_for_libreoffice(
+async def test_libreoffice_extension_is_preserved(
     monkeypatch: pytest.MonkeyPatch,
     filename: str,
     expected_extension: str,
@@ -49,6 +48,62 @@ async def test_supported_extension_is_preserved_for_libreoffice(
 
     assert await docx_convert.attachment_to_pdf(b"source", filename) == b"pdf"
     assert captured == [expected_extension]
+
+
+@pytest.mark.parametrize(
+    ("filename", "image_format", "mode"),
+    [
+        ("原型.PNG", "PNG", "RGBA"),
+        ("页面.jpg", "JPEG", "RGB"),
+        ("页面.JPEG", "JPEG", "RGB"),
+        ("页面.webp", "WEBP", "RGBA"),
+    ],
+)
+async def test_images_convert_directly_without_libreoffice(
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    image_format: str,
+    mode: str,
+) -> None:
+    source = BytesIO()
+    color = (255, 0, 0, 128) if mode == "RGBA" else (255, 0, 0)
+    Image.new(mode, (32, 16), color).save(source, format=image_format)
+    monkeypatch.setattr(
+        docx_convert,
+        "_find_soffice",
+        lambda: pytest.fail("图片转换不得调用 LibreOffice"),
+    )
+
+    result = await docx_convert.attachment_to_pdf(source.getvalue(), filename)
+
+    assert result and result.startswith(b"%PDF-")
+    assert len(PdfReader(BytesIO(result)).pages) == 1
+
+
+async def test_jpeg_exif_orientation_is_applied() -> None:
+    source = BytesIO()
+    image = Image.new("RGB", (40, 20), (0, 128, 255))
+    exif = Image.Exif()
+    exif[274] = 6
+    image.save(source, format="JPEG", exif=exif)
+
+    result = await docx_convert.attachment_to_pdf(source.getvalue(), "rotated.jpg")
+
+    assert result
+    page = PdfReader(BytesIO(result)).pages[0]
+    assert float(page.mediabox.height) > float(page.mediabox.width)
+
+
+async def test_broken_image_returns_none_without_libreoffice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        docx_convert,
+        "_find_soffice",
+        lambda: pytest.fail("损坏图片不得调用 LibreOffice"),
+    )
+
+    assert await docx_convert.attachment_to_pdf(b"not-an-image", "broken.png") is None
 
 
 async def test_pdf_is_returned_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:

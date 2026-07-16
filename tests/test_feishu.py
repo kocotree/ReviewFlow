@@ -609,6 +609,113 @@ async def test_attachment_file_token_prefers_official_drive_media_sdk(config) ->
 
 
 @pytest.mark.asyncio
+async def test_attachment_sdk_failure_falls_back_to_safe_bitable_url(config) -> None:
+    sdk_calls = 0
+
+    def download(_):
+        nonlocal sdk_calls
+        sdk_calls += 1
+        return _response(code=400, msg="", status_code=400)
+
+    sdk = SimpleNamespace(
+        drive=SimpleNamespace(
+            v1=SimpleNamespace(media=SimpleNamespace(download=download))
+        )
+    )
+    http = _FakeHttpClient()
+    client = FeishuClient(
+        config,
+        sdk_client=sdk,
+        http_client=http,  # type: ignore[arg-type]
+        tenant_token_provider=lambda: "tenant-token",
+    )
+
+    result = await client.download_attachment(
+        "https://example.test/bitable-attachment",
+        file_token="bitable_file_token",
+    )
+
+    assert result == b"attachment"
+    assert sdk_calls == 1
+    assert http.calls == [
+        (
+            "https://example.test/bitable-attachment",
+            {"Authorization": "Bearer tenant-token"},
+        )
+    ]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_attachment_sdk_fallback_validates_host_before_requesting_token(
+    config,
+) -> None:
+    token_calls = 0
+
+    def token_provider() -> str:
+        nonlocal token_calls
+        token_calls += 1
+        return "must-not-leak"
+
+    sdk = SimpleNamespace(
+        drive=SimpleNamespace(
+            v1=SimpleNamespace(
+                media=SimpleNamespace(
+                    download=lambda _: _response(code=400, status_code=400)
+                )
+            )
+        )
+    )
+    http = _FakeHttpClient()
+    client = FeishuClient(
+        config,
+        sdk_client=sdk,
+        http_client=http,  # type: ignore[arg-type]
+        tenant_token_provider=token_provider,
+    )
+
+    with pytest.raises(FeishuMaterialError, match="域名不在允许列表"):
+        await client.download_attachment(
+            "https://evil.example/attachment",
+            file_token="bitable_file_token",
+        )
+
+    assert token_calls == 0
+    assert http.calls == []
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_attachment_sdk_size_limit_does_not_retry_via_url(config) -> None:
+    sdk = SimpleNamespace(
+        drive=SimpleNamespace(
+            v1=SimpleNamespace(
+                media=SimpleNamespace(
+                    download=lambda _: _response(file=io.BytesIO(b"0123456789"))
+                )
+            )
+        )
+    )
+    http = _FakeHttpClient()
+    client = FeishuClient(
+        config,
+        sdk_client=sdk,
+        http_client=http,  # type: ignore[arg-type]
+        tenant_token_provider=lambda: pytest.fail("大小超限不得尝试 URL 兜底"),
+    )
+
+    with pytest.raises(FeishuMaterialError, match="大小超过"):
+        await client.download_attachment(
+            "https://example.test/attachment",
+            file_token="bitable_file_token",
+            max_bytes=5,
+        )
+
+    assert http.calls == []
+    await client.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "url",
     [

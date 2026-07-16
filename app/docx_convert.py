@@ -1,9 +1,9 @@
-"""Convert supported attachments to PDF with LibreOffice headless.
+"""Convert supported attachments to PDF.
 
-LibreOffice is intentionally kept behind one small component because it is a
-blocking external process and because concurrent ``soffice`` processes can be
-expensive.  Every conversion gets an isolated user profile, a hard timeout,
-and deterministic temporary-file cleanup.
+Images are converted directly with Pillow because LibreOffice does not
+reliably create PDF output for standalone PNG/JPEG/WebP files.  Word and text
+formats remain behind a headless LibreOffice boundary with an isolated user
+profile, hard timeout, and deterministic temporary-file cleanup.
 
 ``docx_to_pdf`` is retained as a compatibility wrapper for the existing
 orchestrator.  New code should call ``attachment_to_pdf``.
@@ -19,7 +19,11 @@ import signal
 import subprocess
 import tempfile
 import threading
+import warnings
+from io import BytesIO
 from pathlib import Path
+
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +32,9 @@ _SOFFICE_CANDIDATES = ("soffice", "libreoffice")
 
 # PDF inputs already satisfy the component contract and are returned unchanged.
 PASSTHROUGH_EXTENSIONS = frozenset({".pdf"})
-CONVERTIBLE_EXTENSIONS = frozenset(
-    {".doc", ".docx", ".txt", ".md", ".png", ".jpg", ".jpeg", ".webp"}
-)
+IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+LIBREOFFICE_EXTENSIONS = frozenset({".doc", ".docx", ".txt", ".md"})
+CONVERTIBLE_EXTENSIONS = IMAGE_EXTENSIONS | LIBREOFFICE_EXTENSIONS
 SUPPORTED_ATTACHMENT_EXTENSIONS = PASSTHROUGH_EXTENSIONS | CONVERTIBLE_EXTENSIONS
 
 # A corrupt input can leave soffice waiting forever.  Keep both the timeout and
@@ -66,6 +70,10 @@ def _convert_sync(data: bytes, filename: str) -> bytes | None:
         logger.error("不支持转换为 PDF 的附件格式: file=%s", filename)
         return None
 
+    if extension in IMAGE_EXTENSIONS:
+        with _CONVERT_SEMAPHORE:
+            return _run_image_conversion(data, filename)
+
     soffice = _find_soffice()
     if not soffice:
         logger.error("未找到 LibreOffice(soffice)，无法转换附件: file=%s", filename)
@@ -73,6 +81,39 @@ def _convert_sync(data: bytes, filename: str) -> bytes | None:
 
     with _CONVERT_SEMAPHORE:
         return _run_soffice_conversion(soffice, data, filename, extension)
+
+
+def _run_image_conversion(data: bytes, filename: str) -> bytes | None:
+    """Convert one trustworthy image frame to an opaque single-page PDF."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(data)) as source:
+                source.load()
+                image = ImageOps.exif_transpose(source)
+                if image.mode in {"RGBA", "LA"} or "transparency" in image.info:
+                    rgba = image.convert("RGBA")
+                    flattened = Image.new("RGB", rgba.size, "white")
+                    flattened.paste(rgba, mask=rgba.getchannel("A"))
+                    image = flattened
+                else:
+                    image = image.convert("RGB")
+
+                output = BytesIO()
+                image.save(output, format="PDF", resolution=144.0)
+                pdf = output.getvalue()
+                if not pdf.startswith(b"%PDF-"):
+                    raise ValueError("Pillow 未生成有效 PDF")
+                return pdf
+    except (
+        Image.DecompressionBombError,
+        Image.DecompressionBombWarning,
+        UnidentifiedImageError,
+        OSError,
+        ValueError,
+    ) as exc:
+        logger.error("图片转 PDF 失败: file=%s error=%s", filename, exc)
+        return None
 
 
 def _run_soffice_conversion(
@@ -172,8 +213,8 @@ def _reap_process(proc: subprocess.Popen[bytes]) -> None:
 async def attachment_to_pdf(data: bytes, filename: str) -> bytes | None:
     """Return one attachment as PDF bytes, or ``None`` on conversion failure.
 
-    Existing PDF input is returned unchanged.  Other supported extensions are
-    converted by LibreOffice while preserving their original extension.
+    Existing PDF input is returned unchanged. Images use Pillow; Word and text
+    formats use LibreOffice while preserving their original extension.
     """
     return await asyncio.to_thread(_convert_sync, data, filename)
 
