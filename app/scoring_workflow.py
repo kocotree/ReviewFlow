@@ -3,31 +3,23 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any, Callable
+from typing import Any
 
 from app.ai import AIClient, ScoringPayload
 from app.config import Config
 from app.errors import ErrorCategory, FeishuNotFoundError, ReviewFlowError
 from app.field_mapping import (
     FIELD_AI_SCORE,
-    FIELD_AI_SCORE_DETAIL,
-    FIELD_AI_SCORE_TIME,
-    FIELD_DOC_CACHE,
     FIELD_REVISION_ROUNDS,
     FIELD_SCORE_STATUS,
     FIELD_SUBMITTER,
 )
-from app.parser import truncate_content
 from app.record_coordinator import extract_open_id, extract_requirement_title
 from app.result_writer import ResultWriter
 from app.retry import retry_step
 from app.task_registry import ScoreCommand, TaskRegistry
-from app.workflow_errors import (
-    FinalWriteError,
-    TranscriptionError,
-)
+from app.workflow_errors import FinalWriteError
 from app.workflow_state import ScoreStatus, TriggerSource
 
 logger = logging.getLogger(__name__)
@@ -54,7 +46,6 @@ class ScoringWorkflow:
         notifier: Any,
         registry: TaskRegistry,
         writer: ResultWriter | None = None,
-        now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         max_attempts: int = 3,
     ) -> None:
         self._config = config
@@ -68,7 +59,6 @@ class ScoringWorkflow:
             registry=registry,
             max_attempts=max_attempts,
         )
-        self._now = now
         self._max_attempts = max_attempts
 
     async def run(self, command: ScoreCommand) -> WorkflowOutcome:
@@ -101,23 +91,6 @@ class ScoringWorkflow:
 
         try:
             collected = await self._collector.collect(fields)
-            file_payload = ScoringPayload(
-                text="",
-                pdf_files=[(collected.cache_source_pdf, "review-bundle.pdf")],
-            )
-
-            async def transcribe() -> str:
-                text = await self._ai.transcribe(file_payload)
-                if not isinstance(text, str) or not text.strip():
-                    raise TranscriptionError("总 PDF 合并转写为空")
-                return text.strip()
-
-            cache_text = await retry_step(
-                "transcribe_review_bundle",
-                transcribe,
-                max_attempts=self._max_attempts,
-            )
-
             score_payload = ScoringPayload(
                 text=self._score_prompt(collected.original_description),
                 pdf_files=[(collected.review_bundle_pdf, "review-bundle.pdf")],
@@ -153,14 +126,8 @@ class ScoringWorkflow:
 
             final_fields = {
                 FIELD_AI_SCORE: score,
-                FIELD_AI_SCORE_DETAIL: result["detail"],
-                FIELD_AI_SCORE_TIME: int(self._now().timestamp() * 1000),
                 FIELD_SCORE_STATUS: final_status.value,
                 FIELD_REVISION_ROUNDS: new_rounds,
-                FIELD_DOC_CACHE: truncate_content(
-                    cache_text,
-                    max_chars=self._config.doc_cache_max_chars,
-                ),
             }
             written = await self._writer.write_final(command, final_fields)
             if not written:

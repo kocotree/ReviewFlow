@@ -13,10 +13,7 @@ FIELD_ATTACHMENT = "需求附件"            # 附件
 
 # --- AI 评分输出字段 ---
 FIELD_AI_SCORE = "AI评分"            # 数字
-FIELD_AI_SCORE_DETAIL = "AI评分详情"  # 多行文本
-FIELD_AI_SCORE_TIME = "AI评分时间"    # 日期
 
 # --- 工作流控制字段 ---
 FIELD_SCORE_STATUS = "评分状态"       # 单选: 待评分/评分中/已通过/未通过/已驳回
-FIELD_REVISION_ROUNDS = "修改轮次"    # 数字
-FIELD_DOC_CACHE = "文档内容缓存"      # 多行文本（后端自动填充）
+FIELD_REVISION_ROUNDS = "修改轮次"    # 数字（隐藏系统字段）

@@ -51,10 +51,6 @@ class ContentProcessingError(ReviewFlowError):
     category = ErrorCategory.TRANSIENT
 
 
-class TranscriptionError(ReviewFlowError):
-    category = ErrorCategory.TRANSIENT
-
-
 class StateWriteError(ReviewFlowError):
     category = ErrorCategory.TRANSIENT
 

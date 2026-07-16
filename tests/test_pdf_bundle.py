@@ -166,7 +166,7 @@ async def test_invalid_material_pdf_raises_a_clear_error(
         await pdf_bundle.build_pdf_bundle([material])
 
 
-def test_collected_content_is_frozen_and_reuses_the_same_bundle() -> None:
+def test_collected_content_is_frozen_and_keeps_the_scoring_bundle() -> None:
     bundle = _pdf_with_widths(100)
     content = CollectedContent(
         original_description="这是总 PDF 之外的原始描述",
@@ -175,7 +175,6 @@ def test_collected_content_is_frozen_and_reuses_the_same_bundle() -> None:
     )
 
     assert content.original_description == "这是总 PDF 之外的原始描述"
-    assert content.cache_source_pdf is content.review_bundle_pdf
-    assert content.cache_source_pdf is bundle
+    assert content.review_bundle_pdf is bundle
     with pytest.raises(FrozenInstanceError):
         content.original_description = "不可修改"  # type: ignore[misc]

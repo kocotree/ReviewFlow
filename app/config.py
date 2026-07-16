@@ -77,11 +77,6 @@ class Config:
     ai_score_max_tokens: int = field(
         default_factory=lambda: int(os.getenv("AI_SCORE_MAX_TOKENS", "4000"))
     )
-    # 文档转写调用的 max_tokens：转写正文可能较长（限 4000 字内），默认 16000。
-    # 转写与评分已解耦，此处截断只影响缓存回填、不影响评分。
-    ai_transcribe_max_tokens: int = field(
-        default_factory=lambda: int(os.getenv("AI_TRANSCRIBE_MAX_TOKENS", "16000"))
-    )
 
     # ---- 评分配置 ----
     score_threshold: int = field(
@@ -137,9 +132,6 @@ class Config:
     max_image_count: int = field(
         default_factory=lambda: int(os.getenv("MAX_IMAGE_COUNT", "20"))
     )
-    doc_cache_max_chars: int = field(
-        default_factory=lambda: int(os.getenv("DOC_CACHE_MAX_CHARS", "5000"))
-    )
     attachment_allowed_hosts: tuple[str, ...] = field(
         default_factory=lambda: _csv_env(
             "ATTACHMENT_ALLOWED_HOSTS",
@@ -184,8 +176,6 @@ class Config:
             errors.append("AI_TEMPERATURE 必须在 0 到 2 之间")
         if not 1 <= self.ai_score_max_tokens <= 128_000:
             errors.append("AI_SCORE_MAX_TOKENS 必须在 1 到 128000 之间")
-        if not 1 <= self.ai_transcribe_max_tokens <= 128_000:
-            errors.append("AI_TRANSCRIBE_MAX_TOKENS 必须在 1 到 128000 之间")
 
         if not 0 <= self.score_threshold <= 100:
             errors.append("SCORE_THRESHOLD 必须在 0 到 100 之间")
@@ -211,8 +201,6 @@ class Config:
             errors.append("MAX_PDF_PAGES 必须大于 0")
         if self.max_image_count < 1:
             errors.append("MAX_IMAGE_COUNT 必须大于 0")
-        if self.doc_cache_max_chars < 1:
-            errors.append("DOC_CACHE_MAX_CHARS 必须大于 0")
         if not self.attachment_allowed_hosts:
             errors.append("ATTACHMENT_ALLOWED_HOSTS 至少配置一个允许域名")
         if not 1 <= self.port <= 65_535:

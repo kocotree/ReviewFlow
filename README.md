@@ -15,8 +15,8 @@
 
 ## 特性
 
-- **完整内容快照** — 多个在线文档与全部附件每次实时读取，任一材料失败即停止整次评分，绝不使用旧缓存兜底。
-- **唯一总 PDF** — 在线文档在前、附件在后；每份材料前有来源分隔页，转写和评分使用完全相同的 PDF 字节。
+- **完整内容快照** — 多个在线文档与全部附件每次实时读取，任一材料失败即停止整次评分，不使用历史内容降级。
+- **唯一总 PDF** — 在线文档在前、附件在后；每份材料前有来源分隔页，评分模型只接收这一份 PDF。
 - **一致性评分** — 严格扣分制 + 分档标尺 + 温度 0 的确定性采样，让同一份内容多次评分结果稳定可复现。
 - **显式重评** — 只有首次 `待评分` 自动触发；`未通过` 后由原提报人点击卡片按钮重评。
 - **并发与恢复** — 完整记录键串行、回调幂等、递增 fencing、防僵尸写回、优雅 drain 与“评分中”孤儿清道夫。
@@ -30,8 +30,8 @@
 收集表单提交 → 记录写入多维表格
   → 飞书推送 record_changed 事件 → POST /webhook/event
     → 事件去重 + 仅“待评分”自动准入
-      → 完整采集 → 唯一总 PDF → 合并转写 → AI 综合评分
-        → fencing 校验 → 分数、详情、状态、轮次、缓存单次写回
+      → 完整采集 → 唯一总 PDF → AI 综合评分
+        → fencing 校验 → 分数、状态和隐藏轮次单次写回
           → 未通过卡片：用户修改完成后 POST /webhook/card-action 显式重评
 ```
 
@@ -43,7 +43,7 @@
 | `app/record_coordinator.py` / `app/task_registry.py` | 状态准入、身份/回调幂等、每记录串行、任务状态和 fencing |
 | `app/scoring_workflow.py` / `app/result_writer.py` | 固定步骤、失败分类、轮次/终态计算和原子写回 |
 | `app/content_collector.py` / `app/pdf_bundle.py` | 多链接解析、稳定去重、附件转换/校验、来源分隔页和总 PDF |
-| `app/ai.py` | 豆包总 PDF 转写与综合评分、严格 Pydantic 响应校验 |
+| `app/ai.py` | 豆包总 PDF 综合评分、严格 Pydantic 响应校验 |
 | `app/feishu.py` | 类型化异步网关：记录、Wiki、PDF 导出、消息、附件与清道夫查询 |
 | `app/docx_convert.py` | PDF 直通、图片经 Pillow 转 PDF，Word/文本/Markdown 经 LibreOffice 转 PDF |
 | `app/notification.py` / `app/card_templates.py` | 通知策略、卡片模板、重评动作与发送侧熔断 |
@@ -97,11 +97,10 @@ cp .env.example .env
 | `需求文档` | 超链接 | 飞书在线文档链接（docx / docs / wiki） |
 | `需求附件` | 附件 | PDF / Word / Markdown / 图片 |
 | `AI评分` | 数字 | AI 输出分数 |
-| `AI评分详情` | 多行文本 | AI 输出的扣分点与改进建议 |
-| `AI评分时间` | 日期 | 评分完成时间 |
 | `评分状态` | 单选 | `待评分` / `评分中` / `已通过` / `未通过` / `已驳回` / `评分异常` |
-| `修改轮次` | 数字 | 用户手动重评次数；首次评分和技术重试不计数 |
-| `文档内容缓存` | 多行文本 | 本次“在线文档 + 全部附件”总 PDF 的合并转写，不含原始描述，也不作为评分兜底 |
+| `修改轮次` | 数字 | 隐藏系统字段；记录用户手动重评次数，首次评分和技术重试不计数 |
+
+评分详情、亮点和改进建议只用于机器人通知卡片，不写回多维表。服务也不会读取或清理旧的 `AI评分详情`、`AI评分时间`、`文档内容缓存` 字段；如仍存在，请在多维表中手动删除。
 
 ### 4. 启动
 
@@ -170,14 +169,13 @@ client.drive.v1.file.subscribe(req)
 | `AI_BASE_URL` | 方舟地址 | OpenAI 兼容接口地址 |
 | `AI_TEMPERATURE` | `0` | 采样温度，默认确定性采样以稳定评分 |
 | `AI_SCORE_MAX_TOKENS` | `4000` | 评分响应上限（短 JSON，留足余量防截断） |
-| `AI_TRANSCRIBE_MAX_TOKENS` | `16000` | 文档转写响应上限（仅影响缓存回填，不影响评分） |
 | `SCORE_THRESHOLD` | `60` | 评分通过线（0-100） |
 | `MAX_REVISION_ROUNDS` | `5` | 最大修改轮次，超出则驳回 |
 | `NOTIFICATION_GROUP_CHAT_ID` | 空 | 评分异常告警群 `chat_id`；留空则不推送 |
 | `SEND_CIRCUIT_BREAKER_WINDOW_MINUTES` / `SEND_CIRCUIT_BREAKER_MAX_MESSAGES` | `5` / `20` | 同一记录异常发卡熔断；不限制正常提报 |
 | `SCAVENGER_INTERVAL_SECONDS` / `SCORING_ORPHAN_TIMEOUT_SECONDS` | `60` / `900` | “评分中”孤儿扫描与恢复阈值 |
 | `MAX_ATTACHMENT_COUNT` / `MAX_SINGLE_ATTACHMENT_MB` / `MAX_TOTAL_ATTACHMENT_MB` | `20` / `20` / `100` | 附件数量与大小限制 |
-| `MAX_PDF_PAGES` / `MAX_IMAGE_COUNT` / `DOC_CACHE_MAX_CHARS` | `300` / `20` / `5000` | PDF 页数、图片数与缓存转写长度限制 |
+| `MAX_PDF_PAGES` / `MAX_IMAGE_COUNT` | `300` / `20` | PDF 页数与图片数量限制 |
 | `ATTACHMENT_ALLOWED_HOSTS` | 飞书官方域名 | 无 `file_token` 时安全 URL 下载的域名白名单 |
 | `HOST` / `PORT` / `LOG_LEVEL` | `0.0.0.0` / `8000` / `INFO` | 服务监听与日志级别 |
 

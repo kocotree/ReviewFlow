@@ -183,12 +183,12 @@ async def test_score_accepts_only_scoring_payload(config: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_one_openai_client_is_reused_for_all_call_modes(
+async def test_one_openai_client_is_reused_for_text_and_file_scoring(
     config: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     valid_json = encode(VALID_RESULT)
-    stub = StubOpenAIClient([valid_json, valid_json, "合并转写正文"])
+    stub = StubOpenAIClient([valid_json, valid_json])
     constructor_calls: list[dict[str, Any]] = []
 
     def build_client(**kwargs: Any) -> StubOpenAIClient:
@@ -205,7 +205,6 @@ async def test_one_openai_client_is_reused_for_all_call_modes(
         pdf_files=[(b"%PDF-test", "review.pdf")],
     )
     assert await client.score(file_payload) == VALID_RESULT
-    assert await client.transcribe(file_payload) == "合并转写正文"
 
     assert len(constructor_calls) == 1
-    assert len(stub.completions.calls) == 3
+    assert len(stub.completions.calls) == 2

@@ -51,9 +51,8 @@ class PdfMaterial:
 class CollectedContent:
     """A complete, immutable content snapshot for one scoring task.
 
-    The original description stays outside the PDF.  Scoring and cache
-    transcription deliberately read the same single bundle, exposed through
-    ``review_bundle_pdf`` and the read-only ``cache_source_pdf`` alias.
+    The original description stays outside the PDF. All online documents and
+    attachments are represented by the single ``review_bundle_pdf`` value.
     """
 
     original_description: str
@@ -68,8 +67,3 @@ class CollectedContent:
         if not self.review_bundle_pdf:
             raise ValueError("review_bundle_pdf must not be empty")
         object.__setattr__(self, "collection_warnings", tuple(self.collection_warnings))
-
-    @property
-    def cache_source_pdf(self) -> bytes:
-        """Return the exact bundle used for scoring, also used for transcription."""
-        return self.review_bundle_pdf

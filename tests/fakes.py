@@ -200,7 +200,6 @@ class FakeAIClient:
         *,
         supports_pdf: bool = True,
         score_results: Iterable[Any] | None = None,
-        transcriptions: Iterable[Any] | None = None,
         trace: CallTrace | None = None,
     ) -> None:
         self.supports_pdf = supports_pdf
@@ -208,10 +207,7 @@ class FakeAIClient:
         self.outcomes = ScriptedOutcomes()
         if score_results:
             self.outcomes.script("score", *score_results)
-        if transcriptions:
-            self.outcomes.script("transcribe", *transcriptions)
         self.score_payloads: list[Any] = []
-        self.transcribe_payloads: list[Any] = []
         self.started: asyncio.Event | None = None
         self.release: asyncio.Event | None = None
         self.closed = False
@@ -226,12 +222,6 @@ class FakeAIClient:
             self.started.set()
         if self.release is not None:
             await self.release.wait()
-
-    async def transcribe(self, payload: Any) -> str:
-        self.trace.add("ai.transcribe", payload=payload)
-        self.transcribe_payloads.append(payload)
-        await self._wait_gate()
-        return self.outcomes.next("transcribe", "合并转写")
 
     async def score(self, payload: Any) -> Any:
         self.trace.add("ai.score", payload=payload)

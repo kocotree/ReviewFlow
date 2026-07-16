@@ -15,7 +15,6 @@ from app.errors import (
 )
 from app.field_mapping import (
     FIELD_AI_SCORE,
-    FIELD_DOC_CACHE,
     FIELD_DOC_LINK,
     FIELD_REVISION_ROUNDS,
     FIELD_SCORE_STATUS,
@@ -106,18 +105,21 @@ async def execute(
 async def test_fixed_execution_order_and_single_final_write(config, record_factory) -> None:
     trace = CallTrace()
     bundle = b"same-bundle"
+    fields = {
+        **record_factory(status="待评分"),
+        "AI评分详情": "旧详情",
+        "AI评分时间": 1_700_000_000_000,
+        "文档内容缓存": "旧缓存",
+    }
     outcome, feishu, ai, notifier, collector, trace, _ = await execute(
         config=config,
-        fields=record_factory(status="待评分", cache="旧缓存"),
+        fields=fields,
         trace=trace,
         collector=FakeCollector(
             CollectedContent("补充描述", bundle),
             trace=trace,
         ),
-        ai=FakeAIClient(
-            transcriptions=["本次合并转写"],
-            trace=trace,
-        ),
+        ai=FakeAIClient(trace=trace),
         notifier=FakeNotifier(trace=trace),
     )
 
@@ -126,26 +128,78 @@ async def test_fixed_execution_order_and_single_final_write(config, record_facto
         "feishu.get_record",
         "feishu.update_record",
         "collector.collect",
-        "ai.transcribe",
         "ai.score",
         "feishu.update_record",
         "notify.passed",
     ]
     updates = [details["fields"] for name, details in trace.calls if name == "feishu.update_record"]
     assert updates[0] == {FIELD_SCORE_STATUS: "评分中"}
-    assert set(updates[1]) >= {
+    assert updates[1] == {
+        FIELD_AI_SCORE: 80,
+        FIELD_SCORE_STATUS: "已通过",
+        FIELD_REVISION_ROUNDS: 0,
+    }
+    assert ai.score_payloads[0].pdf_files[0][0] is bundle
+    assert "补充描述" in ai.score_payloads[0].text
+    assert notifier.notifications[0][1]["requirement_title"] == "测试需求"
+    stored = feishu.records[("app", "table", "record")]
+    assert stored["AI评分详情"] == "旧详情"
+    assert stored["AI评分时间"] == 1_700_000_000_000
+    assert stored["文档内容缓存"] == "旧缓存"
+
+
+@pytest.mark.asyncio
+async def test_failed_detail_is_not_written_but_remains_in_notification(
+    config,
+    record_factory,
+    valid_score_result,
+) -> None:
+    result = {
+        **valid_score_result,
+        "score": 60,
+        "detail": "缺少明确验收标准，请补充可验证条件。",
+        "dimensions": {
+            "completeness": 18,
+            "logic": 18,
+            "format": 12,
+            "quality": 12,
+        },
+    }
+
+    _, feishu, _, notifier, *_ = await execute(
+        config=config,
+        fields=record_factory(status="待评分"),
+        ai=FakeAIClient(score_results=[result]),
+    )
+
+    final_update = [
+        details["fields"]
+        for name, details in feishu.trace.calls
+        if name == "feishu.update_record"
+    ][-1]
+    assert set(final_update) == {
         FIELD_AI_SCORE,
         FIELD_SCORE_STATUS,
         FIELD_REVISION_ROUNDS,
-        FIELD_DOC_CACHE,
     }
-    assert updates[1][FIELD_DOC_CACHE] == "本次合并转写"
-    assert updates[1][FIELD_REVISION_ROUNDS] == 0
-    assert ai.transcribe_payloads[0].pdf_files[0][0] is bundle
-    assert ai.score_payloads[0].pdf_files[0][0] is bundle
-    assert ai.transcribe_payloads[0].text == ""
-    assert "补充描述" in ai.score_payloads[0].text
-    assert notifier.notifications[0][1]["requirement_title"] == "测试需求"
+    assert notifier.notifications == [
+        (
+            "failed",
+            {
+                "open_id": "ou_submitter",
+                "record_id": "record",
+                "requirement_title": "测试需求",
+                "app_token": "app",
+                "table_id": "table",
+                "score": 60,
+                "detail": "缺少明确验收标准，请补充可验证条件。",
+                "threshold": config.score_threshold,
+                "rounds": 0,
+                "max_rounds": config.max_revision_rounds,
+                "base_url": config.feishu_base_url,
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -168,39 +222,6 @@ async def test_enter_scoring_failure_stops_before_collection_and_ai(config, reco
     assert outcome is WorkflowOutcome.ENTRY_FAILED
     assert collector.calls == []
     assert ai.score_payloads == []
-    assert ai.transcribe_payloads == []
-
-
-@pytest.mark.asyncio
-async def test_transcription_failure_retries_only_transcription_and_blocks_score(
-    config,
-    record_factory,
-) -> None:
-    ai = FakeAIClient(
-        transcriptions=[
-            AITransientError("temporary"),
-            AITransientError("temporary"),
-            AITransientError("temporary"),
-        ]
-    )
-    collector = FakeCollector()
-
-    outcome, feishu, ai, notifier, *_ = await execute(
-        config=config,
-        fields=record_factory(status="待评分", rounds=2, cache="旧缓存"),
-        collector=collector,
-        ai=ai,
-    )
-
-    assert outcome is WorkflowOutcome.TECHNICAL_FAILED
-    assert len(collector.calls) == 1
-    assert len(ai.transcribe_payloads) == 3
-    assert ai.score_payloads == []
-    stored = feishu.records[("app", "table", "record")]
-    assert stored[FIELD_SCORE_STATUS] == "评分异常"
-    assert stored[FIELD_REVISION_ROUNDS] == 2
-    assert stored[FIELD_DOC_CACHE] == "旧缓存"
-    assert [kind for kind, _ in notifier.notifications] == ["admin_error"]
 
 
 @pytest.mark.asyncio
@@ -215,7 +236,6 @@ async def test_score_transient_retry_does_not_repeat_completed_steps(
             AITransientError("temporary"),
             valid_score_result,
         ],
-        transcriptions=["cache"],
     )
     collector = FakeCollector()
 
@@ -228,7 +248,6 @@ async def test_score_transient_retry_does_not_repeat_completed_steps(
 
     assert outcome is WorkflowOutcome.COMPLETED
     assert len(collector.calls) == 1
-    assert len(ai.transcribe_payloads) == 1
     assert len(ai.score_payloads) == 3
 
 
@@ -237,10 +256,7 @@ async def test_invalid_ai_response_is_system_error_without_round_or_user_card(
     config,
     record_factory,
 ) -> None:
-    ai = FakeAIClient(
-        score_results=[AIScoringError("schema invalid")],
-        transcriptions=["cache"],
-    )
+    ai = FakeAIClient(score_results=[AIScoringError("schema invalid")])
 
     outcome, feishu, ai, notifier, *_ = await execute(
         config=config,
@@ -264,18 +280,16 @@ async def test_material_failure_becomes_failed_without_round_or_ai(config, recor
 
     outcome, feishu, ai, notifier, *_ = await execute(
         config=config,
-        fields=record_factory(status="待评分", rounds=2, cache="旧缓存"),
+        fields=record_factory(status="待评分", rounds=2),
         collector=collector,
         ai=ai,
     )
 
     assert outcome is WorkflowOutcome.MATERIAL_FAILED
-    assert ai.transcribe_payloads == []
     assert ai.score_payloads == []
     stored = feishu.records[("app", "table", "record")]
     assert stored[FIELD_SCORE_STATUS] == "未通过"
     assert stored[FIELD_REVISION_ROUNDS] == 2
-    assert stored[FIELD_DOC_CACHE] == "旧缓存"
     assert [kind for kind, _ in notifier.notifications] == ["material_error"]
     assert notifier.notifications[0][1]["requirement_title"] == "测试需求"
 
@@ -308,7 +322,7 @@ async def test_online_document_user_errors_become_failed_without_round(
 ) -> None:
     outcome, feishu, ai, notifier, *_ = await execute(
         config=config,
-        fields=record_factory(status="待评分", rounds=1, cache="旧缓存"),
+        fields=record_factory(status="待评分", rounds=1),
         collector=FakeCollector(error=error),
     )
 
@@ -317,7 +331,6 @@ async def test_online_document_user_errors_become_failed_without_round(
     stored = feishu.records[("app", "table", "record")]
     assert stored[FIELD_SCORE_STATUS] == "未通过"
     assert stored[FIELD_REVISION_ROUNDS] == 1
-    assert stored[FIELD_DOC_CACHE] == "旧缓存"
     assert [kind for kind, _ in notifier.notifications] == ["material_error"]
 
 
@@ -328,17 +341,15 @@ async def test_pdf_bundle_failure_never_calls_ai_or_writes_partial_result(
 ) -> None:
     outcome, feishu, ai, notifier, *_ = await execute(
         config=config,
-        fields=record_factory(status="待评分", rounds=1, cache="旧缓存"),
+        fields=record_factory(status="待评分", rounds=1),
         collector=FakeCollector(error=ContentProcessingError("PDF merge failed")),
     )
 
     assert outcome is WorkflowOutcome.TECHNICAL_FAILED
-    assert ai.transcribe_payloads == []
     assert ai.score_payloads == []
     stored = feishu.records[("app", "table", "record")]
     assert stored[FIELD_SCORE_STATUS] == "评分异常"
     assert stored[FIELD_REVISION_ROUNDS] == 1
-    assert stored[FIELD_DOC_CACHE] == "旧缓存"
     assert [kind for kind, _ in notifier.notifications] == ["admin_error"]
 
 
@@ -369,7 +380,7 @@ async def test_description_documents_and_attachments_use_one_composite_score_cal
         bundle_builder=build,
         require_soffice=lambda: True,
     )
-    ai = FakeAIClient(transcriptions=["文档与附件合并转写"])
+    ai = FakeAIClient()
 
     outcome, feishu, ai, *_ = await execute(
         config=config,
@@ -385,10 +396,6 @@ async def test_description_documents_and_attachments_use_one_composite_score_cal
     assert len(ai.score_payloads[0].pdf_files) == 1
     assert ai.score_payloads[0].pdf_files[0][0] == b"composite-bundle"
     assert "补充业务目标" in ai.score_payloads[0].text
-    assert (
-        feishu.records[("app", "table", "record")][FIELD_DOC_CACHE]
-        == "文档与附件合并转写"
-    )
 
 
 @pytest.mark.asyncio
@@ -421,7 +428,7 @@ async def test_round_and_terminal_status_rules(
             else {"completeness": 18, "logic": 18, "format": 12, "quality": 12}
         ),
     }
-    ai = FakeAIClient(score_results=[result], transcriptions=["cache"])
+    ai = FakeAIClient(score_results=[result])
 
     _, feishu, *_ = await execute(
         config=config,
@@ -497,7 +504,7 @@ async def test_rescore_admission_and_workflow_each_read_latest_record_snapshot(
     workflow = ScoringWorkflow(
         config=config,
         feishu=feishu,
-        ai=FakeAIClient(transcriptions=["cache"]),
+        ai=FakeAIClient(),
         collector=collector,
         notifier=FakeNotifier(),
         registry=registry,

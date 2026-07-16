@@ -64,7 +64,6 @@ async def test_fake_clock_advances_without_real_wait() -> None:
 def test_call_trace_preserves_cross_client_order() -> None:
     trace = CallTrace()
     trace.add("collect")
-    trace.add("transcribe")
     trace.add("score")
 
-    assert trace.names == ["collect", "transcribe", "score"]
+    assert trace.names == ["collect", "score"]

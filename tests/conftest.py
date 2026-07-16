@@ -7,7 +7,6 @@ import pytest
 from app.config import Config, get_config
 from app.field_mapping import (
     FIELD_ATTACHMENT,
-    FIELD_DOC_CACHE,
     FIELD_DOC_LINK,
     FIELD_IS_RPA,
     FIELD_REQUIREMENT_TITLE,
@@ -102,7 +101,6 @@ def record_factory():
         attachments: list[dict[str, Any]] | None = None,
         description: str = "原始需求描述",
         rounds: int = 0,
-        cache: str = "",
         submitter: str = "ou_submitter",
         is_rpa: Any = "是",
         requirement_title: Any = "测试需求",
@@ -115,7 +113,6 @@ def record_factory():
             FIELD_ATTACHMENT: attachments or [],
             FIELD_TEXT_CONTENT: description,
             FIELD_REVISION_ROUNDS: rounds,
-            FIELD_DOC_CACHE: cache,
             FIELD_SUBMITTER: [{"id": submitter, "name": "测试用户"}],
         }
 

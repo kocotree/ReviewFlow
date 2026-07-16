@@ -62,17 +62,3 @@ def classify_attachment(mime_type: str, filename: str = "") -> AttachmentKind:
     if mime_type in IMAGE_MIME_TYPES:
         return "image"
     return "unsupported"
-
-
-def truncate_content(text: str, max_chars: int = 8000) -> str:
-    """超过上限时保留头部 60% 与尾部 20%。"""
-    if len(text) <= max_chars:
-        return text
-    head_len = int(max_chars * 0.6)
-    tail_len = int(max_chars * 0.2)
-    omitted = len(text) - head_len - tail_len
-    return (
-        text[:head_len]
-        + f"\n\n...[中间省略 {omitted} 字符]...\n\n"
-        + text[-tail_len:]
-    )

@@ -148,19 +148,6 @@ SCORING_SYSTEM_PROMPT = """\
   }
 }"""
 
-# 纯文档转写系统提示（不评分）。
-# 评分与转写已拆分为两次独立调用：评分走 SCORING_SYSTEM_PROMPT（响应短、不会被
-# 转写文本撑长而截断）；转写单独用本提示，把随附文件/图片忠实转成文字，用于回填
-# 「文档内容缓存」字段（飞书 raw_content 接口只给图片占位符，拿不到图像内容）。
-# 转写直接输出纯文本，不再包裹 JSON，避免截断导致解析失败。
-TRANSCRIBE_SYSTEM_PROMPT = """\
-你是一位专业的文档转写助手。请对用户随附的文件/图片做一次忠实的文字转写。
-
-要求：
-- 忠实转写文件/图片中的文字，尽量保留原有结构与层次；
-- 对其中的图片、图表、表格，用简洁中文说明其内容与要点，禁止输出“[图片]”这类占位符；
-- 只转写、不做任何评价或打分；
-- 直接输出转写正文纯文本，不要输出 JSON、不要加多余前后缀，整体控制在 4000 字以内。"""
 
 class AIScoringError(ReviewFlowError):
     """AI 评分异常。"""
@@ -208,9 +195,6 @@ class AIClient:
 
         评分入口只接收 ScoringPayload，文本与文件素材由调用方预先归一化。
 
-        评分只做评分，不再顺带转写文档——文档转写已拆分为独立的
-        transcribe() 调用，避免转写文本把评分响应撑长而被 max_tokens 截断。
-
         Raises:
             AIScoringError: AI 调用失败或解析失败时抛出。
         """
@@ -230,22 +214,6 @@ class AIClient:
             raise AIScoringError("AI 返回空响应")
 
         return self._parse_response(raw_response)
-
-    async def transcribe(self, payload: ScoringPayload) -> str | None:
-        """将随附 PDF/图片转写为纯文本，用于回填「文档内容缓存」字段。
-
-        仅在豆包 + file-capable 型号 + 确有可直传文件时走视觉转写；其余情况
-        返回 None，由调用方回退到纯文本兜底（在线文档 raw_content + 附件抽取文本）。
-        与评分完全独立：转写失败或截断都不影响评分结果。
-        """
-        use_direct = (
-            self._provider == "doubao"
-            and payload.has_direct_files()
-            and doubao_supports_file(self._config.ai_model)
-        )
-        if not use_direct:
-            return None
-        return await self._call_doubao_transcribe(payload)
 
     async def close(self) -> None:
         """关闭复用的异步 OpenAI HTTP Client。"""
@@ -274,7 +242,7 @@ class AIClient:
         """构造豆包多模态 content 数组：文本 + 唯一总 PDF。
 
         PDF 用 base64 data-URI 内联（file_data），避免 Files API 两步上传。
-        评分与转写共用此逻辑，仅首段文本提示词不同。
+        首段文本使用原始描述评分提示；PDF 作为唯一文件素材随请求发送。
         """
         content: list[dict[str, Any]] = [
             {"type": "text", "text": payload.text or fallback_text}
@@ -294,11 +262,7 @@ class AIClient:
         return content
 
     async def _call_doubao_multimodal(self, payload: ScoringPayload) -> str | None:
-        """调用豆包 API 评分，直传唯一总 PDF（file 模态）。
-
-        仅评分、不转写——文档转写已拆分为独立的 _call_doubao_transcribe，
-        故此处响应短、max_tokens 精简，不会被转写文本撑长而截断。
-        """
+        """调用豆包 API 评分，直传唯一总 PDF（file 模态）。"""
         try:
             content = self._build_doubao_content(
                 payload, "请对随附文件进行综合评分。"
@@ -317,31 +281,6 @@ class AIClient:
         except Exception as e:
             logger.error("豆包多模态调用失败: %s", e)
             raise AITransientError(f"豆包多模态调用失败: {e}") from e
-
-    async def _call_doubao_transcribe(self, payload: ScoringPayload) -> str | None:
-        """调用豆包 API 转写直传 PDF/图片，返回纯文本转写正文（不评分）。
-
-        独立于评分调用：用 TRANSCRIBE_SYSTEM_PROMPT，直接输出纯文本、放宽
-        max_tokens；即便被截断也只影响缓存回填，不会污染评分。
-        """
-        try:
-            content = self._build_doubao_content(
-                payload, "请对随附文件/图片进行忠实文字转写。"
-            )
-
-            resp = await self._client.chat.completions.create(
-                model=self._config.ai_model,
-                messages=[
-                    {"role": "system", "content": TRANSCRIBE_SYSTEM_PROMPT},
-                    {"role": "user", "content": content},
-                ],
-                temperature=self._config.ai_temperature,
-                max_tokens=self._config.ai_transcribe_max_tokens,
-            )
-            return resp.choices[0].message.content
-        except Exception as e:
-            logger.error("豆包转写调用失败: %s", e)
-            raise AITransientError(f"豆包转写调用失败: {e}") from e
 
     def _parse_response(self, text: str) -> dict[str, Any]:
         """Decode a JSON object and validate the complete scoring schema.
