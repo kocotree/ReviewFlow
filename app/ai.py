@@ -17,6 +17,7 @@ from openai import AsyncOpenAI
 from pydantic import ValidationError
 
 from app.config import Config
+from app.errors import ErrorCategory, ReviewFlowError
 from app.models.scoring import ScoringResult
 
 logger = logging.getLogger(__name__)
@@ -48,22 +49,16 @@ def doubao_supports_file(model: str) -> bool:
 class ScoringPayload:
     """评分素材包。
 
-    把「三段纯文本」升级为「文本 + 一组待直传的文件/图片」，由 AIClient
-    按当前 provider 能力决定走直传还是降级为纯文本。
-
-    - text: 已拼好并截断的纯文本（文本字段 + 各类降级抽取文本），始终作为
-      兜底，即使走文件直传也一并发送，确保非多模态 provider 有内容可评。
-    - pdf_files: 待直传的 PDF，元素为 (bytes, 文件名)。
-    - image_files: 待直传的图片，元素为 (bytes, mime_type)。
+    采集层已经把全部在线文档和附件合并成唯一 PDF；原始描述作为独立文本，
+    不再保留纯文本降级或独立图片模态。
     """
 
     text: str = ""
     pdf_files: list[tuple[bytes, str]] = field(default_factory=list)
-    image_files: list[tuple[bytes, str]] = field(default_factory=list)
 
     def has_direct_files(self) -> bool:
-        """是否存在可直传的文件或图片。"""
-        return bool(self.pdf_files or self.image_files)
+        """是否存在可直传的总 PDF。"""
+        return bool(self.pdf_files)
 
     def is_empty(self) -> bool:
         """可用内容是否为空（无文本且无可直传文件）。"""
@@ -167,9 +162,16 @@ TRANSCRIBE_SYSTEM_PROMPT = """\
 - 只转写、不做任何评价或打分；
 - 直接输出转写正文纯文本，不要输出 JSON、不要加多余前后缀，整体控制在 4000 字以内。"""
 
-class AIScoringError(Exception):
+class AIScoringError(ReviewFlowError):
     """AI 评分异常。"""
-    pass
+
+    category = ErrorCategory.SYSTEM_HARD_FAILURE
+
+
+class AITransientError(AIScoringError):
+    """AI 网络、限流或临时服务错误。"""
+
+    category = ErrorCategory.TRANSIENT
 
 
 class AIClient:
@@ -193,6 +195,12 @@ class AIClient:
         self._client = client or AsyncOpenAI(
             api_key=config.ai_api_key,
             base_url=base_url,
+        )
+
+    @property
+    def supports_pdf_input(self) -> bool:
+        return self._provider == "doubao" and doubao_supports_file(
+            self._config.ai_model
         )
 
     async def score(self, payload: ScoringPayload) -> dict[str, Any]:
@@ -258,12 +266,12 @@ class AIClient:
             return resp.choices[0].message.content
         except Exception as e:
             logger.error("豆包 调用失败: %s", e)
-            raise AIScoringError(f"豆包调用失败: {e}") from e
+            raise AITransientError(f"豆包调用失败: {e}") from e
 
     def _build_doubao_content(
         self, payload: ScoringPayload, fallback_text: str
     ) -> list[dict[str, Any]]:
-        """构造豆包多模态 content 数组：文本 + 若干 PDF file 部件 + 若干图片部件。
+        """构造豆包多模态 content 数组：文本 + 唯一总 PDF。
 
         PDF 用 base64 data-URI 内联（file_data），避免 Files API 两步上传。
         评分与转写共用此逻辑，仅首段文本提示词不同。
@@ -283,17 +291,10 @@ class AIClient:
                 },
             })
 
-        for data, mime in payload.image_files:
-            b64 = base64.b64encode(data).decode("utf-8")
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:{mime};base64,{b64}"},
-            })
-
         return content
 
     async def _call_doubao_multimodal(self, payload: ScoringPayload) -> str | None:
-        """调用豆包 API 评分，直传 PDF（file 模态）与图片（image_url 模态）。
+        """调用豆包 API 评分，直传唯一总 PDF（file 模态）。
 
         仅评分、不转写——文档转写已拆分为独立的 _call_doubao_transcribe，
         故此处响应短、max_tokens 精简，不会被转写文本撑长而截断。
@@ -315,7 +316,7 @@ class AIClient:
             return resp.choices[0].message.content
         except Exception as e:
             logger.error("豆包多模态调用失败: %s", e)
-            raise AIScoringError(f"豆包多模态调用失败: {e}") from e
+            raise AITransientError(f"豆包多模态调用失败: {e}") from e
 
     async def _call_doubao_transcribe(self, payload: ScoringPayload) -> str | None:
         """调用豆包 API 转写直传 PDF/图片，返回纯文本转写正文（不评分）。
@@ -340,7 +341,7 @@ class AIClient:
             return resp.choices[0].message.content
         except Exception as e:
             logger.error("豆包转写调用失败: %s", e)
-            raise AIScoringError(f"豆包转写调用失败: {e}") from e
+            raise AITransientError(f"豆包转写调用失败: {e}") from e
 
     def _parse_response(self, text: str) -> dict[str, Any]:
         """Decode a JSON object and validate the complete scoring schema.

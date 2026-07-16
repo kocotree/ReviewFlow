@@ -86,7 +86,6 @@ async def test_drain_stops_accepting_and_waits_for_running_task() -> None:
 
 
 def test_complete_record_key_prevents_cross_table_collision() -> None:
-    registry = TaskRegistry()
     first = RecordKey("app-a", "table", "record")
     second = RecordKey("app-b", "table", "record")
 

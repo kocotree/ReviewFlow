@@ -61,13 +61,6 @@ def _update_sdk(handler: Callable[[Any], Any]) -> Any:
     )
 
 
-def _doc_sdk(handler: Callable[[Any], Any]) -> Any:
-    endpoint = SimpleNamespace(raw_content=handler)
-    return SimpleNamespace(
-        docx=SimpleNamespace(v1=SimpleNamespace(document=endpoint))
-    )
-
-
 class _FakeHttpClient:
     def __init__(self, response: httpx.Response | None = None) -> None:
         self.response = response or httpx.Response(
@@ -78,9 +71,26 @@ class _FakeHttpClient:
         self.calls: list[tuple[str, dict[str, str]]] = []
         self.close_calls = 0
 
-    async def get(self, url: str, *, headers: dict[str, str]) -> httpx.Response:
+    class _Stream:
+        def __init__(self, response: httpx.Response) -> None:
+            self.response = response
+
+        async def __aenter__(self) -> httpx.Response:
+            return self.response
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    def stream(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+    ) -> "_FakeHttpClient._Stream":
+        assert method == "GET"
         self.calls.append((url, headers))
-        return self.response
+        return self._Stream(self.response)
 
     async def aclose(self) -> None:
         self.close_calls += 1
@@ -124,6 +134,81 @@ async def test_sync_sdk_call_runs_off_event_loop(config) -> None:
 
     release.set()
     assert await task == {"评分状态": "待评分"}
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_scoring_records_returns_system_last_modified_time(config) -> None:
+    requests_seen = []
+    responses = iter(
+        [
+            _response(
+                data=SimpleNamespace(
+                    items=[
+                        SimpleNamespace(
+                            record_id="rec_1",
+                            fields={"评分状态": "评分中"},
+                            last_modified_time=123_000,
+                        )
+                    ],
+                    has_more=True,
+                    page_token="next",
+                )
+            ),
+            _response(
+                data=SimpleNamespace(
+                    items=[
+                        SimpleNamespace(
+                            record_id="rec_2",
+                            fields={"评分状态": "评分中"},
+                            last_modified_time=456_000,
+                        )
+                    ],
+                    has_more=False,
+                    page_token="",
+                )
+            ),
+        ]
+    )
+
+    def search(request):
+        requests_seen.append(request)
+        return next(responses)
+
+    sdk = SimpleNamespace(
+        bitable=SimpleNamespace(
+            v1=SimpleNamespace(
+                app_table_record=SimpleNamespace(search=search),
+            )
+        )
+    )
+    client = FeishuClient(
+        config,
+        sdk_client=sdk,
+        http_client=_FakeHttpClient(),  # type: ignore[arg-type]
+        tenant_token_provider=lambda: "token",
+    )
+
+    records = await client.list_scoring_records(app_token="app", table_id="table")
+
+    assert records == [
+        {
+            "record_id": "rec_1",
+            "fields": {"评分状态": "评分中"},
+            "last_modified_time": 123_000,
+        },
+        {
+            "record_id": "rec_2",
+            "fields": {"评分状态": "评分中"},
+            "last_modified_time": 456_000,
+        },
+    ]
+    assert requests_seen[0].page_token is None
+    assert requests_seen[1].page_token == "next"
+    condition = requests_seen[0].request_body.filter.conditions[0]
+    assert condition.field_name == "评分状态"
+    assert condition.value == ["评分中"]
+    assert requests_seen[0].request_body.automatic_fields
     await client.close()
 
 
@@ -270,7 +355,6 @@ async def test_export_workflow_concurrency_is_bounded(config, monkeypatch) -> No
     await client.close()
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("response", "error_type", "category"),
     [
@@ -340,23 +424,22 @@ async def test_export_workflow_concurrency_is_bounded(config, monkeypatch) -> No
         ),
     ],
 )
-async def test_document_api_errors_keep_type_and_category(
-    config, response, error_type, category
+def test_document_api_errors_keep_type_and_category(
+    response, error_type, category
 ) -> None:
-    client = FeishuClient(
-        config,
-        sdk_client=_doc_sdk(lambda _: response),
-        http_client=_FakeHttpClient(),  # type: ignore[arg-type]
-        tenant_token_provider=lambda: "token",
+    error = feishu_module._typed_error(
+        operation="export_doc_to_pdf",
+        message=response.msg,
+        code=response.code,
+        status_code=response.raw.status_code,
+        resource_id="doc_1",
+        document_level=True,
     )
 
-    with pytest.raises(error_type) as exc_info:
-        await client.get_doc_raw_content("doc_1")
-
-    assert exc_info.value.category is category
-    assert exc_info.value.operation == "get_doc_raw_content"
-    assert exc_info.value.resource_id == "doc_1"
-    await client.close()
+    assert isinstance(error, error_type)
+    assert error.category is category
+    assert error.operation == "export_doc_to_pdf"
+    assert error.resource_id == "doc_1"
 
 
 @pytest.mark.parametrize(
@@ -483,6 +566,102 @@ async def test_download_uses_injected_token_provider_and_reused_http_client(
     await client.close()
     await client.close()
     assert http.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_attachment_file_token_prefers_official_drive_media_sdk(config) -> None:
+    read_threads = []
+
+    class TrackedFile(io.BytesIO):
+        def read(self, *args: Any, **kwargs: Any) -> bytes:
+            read_threads.append(threading.get_ident())
+            return super().read(*args, **kwargs)
+
+    requests_seen = []
+
+    def download(request):
+        requests_seen.append(request)
+        return _response(file=TrackedFile(b"attachment-via-sdk"))
+
+    sdk = SimpleNamespace(
+        drive=SimpleNamespace(
+            v1=SimpleNamespace(media=SimpleNamespace(download=download))
+        )
+    )
+    http = _FakeHttpClient()
+    client = FeishuClient(
+        config,
+        sdk_client=sdk,
+        http_client=http,  # type: ignore[arg-type]
+        tenant_token_provider=lambda: pytest.fail("SDK 下载不需要手工 tenant token"),
+    )
+
+    result = await client.download_attachment(
+        "https://evil.example/should-not-be-used",
+        file_token="file_token_1",
+    )
+
+    assert result == b"attachment-via-sdk"
+    assert requests_seen[0].file_token == "file_token_1"
+    assert http.calls == []
+    assert read_threads
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://example.test/file",
+        "https://evil.example/file?tenant_access_token=secret",
+    ],
+)
+async def test_download_rejects_unapproved_url_before_requesting_token(config, url) -> None:
+    token_calls = 0
+
+    def token_provider() -> str:
+        nonlocal token_calls
+        token_calls += 1
+        return "must-not-be-used"
+
+    http = _FakeHttpClient()
+    client = FeishuClient(
+        config,
+        sdk_client=SimpleNamespace(),
+        http_client=http,  # type: ignore[arg-type]
+        tenant_token_provider=token_provider,
+    )
+
+    with pytest.raises(FeishuMaterialError) as exc_info:
+        await client.download_attachment(url)
+
+    assert token_calls == 0
+    assert http.calls == []
+    assert "secret" not in str(exc_info.value)
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_streaming_download_stops_when_size_limit_is_exceeded(config) -> None:
+    response = httpx.Response(
+        200,
+        content=b"0123456789",
+        request=httpx.Request("GET", "https://example.test/file"),
+    )
+    client = FeishuClient(
+        config,
+        sdk_client=SimpleNamespace(),
+        http_client=_FakeHttpClient(response),  # type: ignore[arg-type]
+        tenant_token_provider=lambda: "token",
+    )
+
+    with pytest.raises(FeishuMaterialError, match="大小超过"):
+        await client.download_attachment(
+            "https://example.test/file?temporary_token=hidden",
+            max_bytes=5,
+        )
+
+    await client.close()
 
 
 @pytest.mark.asyncio

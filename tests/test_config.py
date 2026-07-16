@@ -46,6 +46,17 @@ def test_unsupported_provider_is_rejected_at_startup(config) -> None:
             "SEND_CIRCUIT_BREAKER_MAX_MESSAGES 必须大于 0",
         ),
         ("shutdown_timeout_seconds", 0, "SHUTDOWN_TIMEOUT_SECONDS 必须大于 0"),
+        ("scavenger_interval_seconds", 0, "SCAVENGER_INTERVAL_SECONDS 必须大于 0"),
+        (
+            "scoring_orphan_timeout_seconds",
+            0,
+            "SCORING_ORPHAN_TIMEOUT_SECONDS 必须大于 0",
+        ),
+        ("max_attachment_count", 0, "MAX_ATTACHMENT_COUNT 必须大于 0"),
+        ("max_single_attachment_mb", 0, "MAX_SINGLE_ATTACHMENT_MB 必须大于 0"),
+        ("max_pdf_pages", 0, "MAX_PDF_PAGES 必须大于 0"),
+        ("max_image_count", 0, "MAX_IMAGE_COUNT 必须大于 0"),
+        ("doc_cache_max_chars", 0, "DOC_CACHE_MAX_CHARS 必须大于 0"),
         ("port", 70_000, "PORT 必须在 1 到 65535 之间"),
     ],
 )

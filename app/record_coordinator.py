@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Awaitable, Callable
 
+from app.errors import FeishuNotFoundError
 from app.field_mapping import FIELD_SCORE_STATUS, FIELD_SUBMITTER
 from app.task_registry import (
     RecordKey,
@@ -141,11 +142,15 @@ class RecordCoordinator:
             if self._registry.has_active(key):
                 return ScoreRequestResult(RequestStatus.ALREADY_RUNNING)
 
-            fields = await self._feishu.get_record(
-                key.record_id,
-                app_token=key.app_token,
-                table_id=key.table_id,
-            )
+            try:
+                fields = await self._feishu.get_record(
+                    key.record_id,
+                    app_token=key.app_token,
+                    table_id=key.table_id,
+                )
+            except FeishuNotFoundError:
+                self._release_callback(callback_id)
+                return ScoreRequestResult(RequestStatus.RECORD_NOT_FOUND)
             if fields is None:
                 self._release_callback(callback_id)
                 return ScoreRequestResult(RequestStatus.RECORD_NOT_FOUND)

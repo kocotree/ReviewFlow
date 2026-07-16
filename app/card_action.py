@@ -31,9 +31,15 @@ class CardActionResponse:
     content: str
     kind: str = "info"
     status_code: int = 200
+    replacement_card: dict[str, Any] | None = None
 
     def as_lark_payload(self) -> dict[str, Any]:
-        return {"toast": {"type": self.kind, "content": self.content}}
+        payload: dict[str, Any] = {
+            "toast": {"type": self.kind, "content": self.content}
+        }
+        if self.replacement_card is not None:
+            payload["card"] = self.replacement_card
+        return payload
 
 
 class CardActionService:
@@ -94,7 +100,14 @@ class CardActionService:
                 if source is TriggerSource.ADMIN_RETRY
                 else "已提交重新评分"
             )
-            return CardActionResponse(content)
+            return CardActionResponse(
+                content,
+                replacement_card=_submitted_card(
+                    "管理员重试已受理"
+                    if source is TriggerSource.ADMIN_RETRY
+                    else "重新评分已受理"
+                ),
+            )
         if status is RequestStatus.ALREADY_RUNNING:
             return CardActionResponse("正在评分，请勿重复点击", kind="warning")
         if status is RequestStatus.FORBIDDEN:
@@ -121,4 +134,34 @@ def build_score_action_value(
         "app_token": app_token,
         "table_id": table_id,
         "record_id": record_id,
+    }
+
+
+def _submitted_card(title: str) -> dict[str, Any]:
+    """回调往返后替换旧卡片，禁用按钮仅作为 UX 提示。"""
+    return {
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "template": "blue",
+        },
+        "elements": [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": "评分任务已提交，请等待机器人返回结果。",
+                },
+            },
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "正在评分"},
+                        "type": "default",
+                        "disabled": True,
+                    }
+                ],
+            },
+        ],
     }

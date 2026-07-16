@@ -58,6 +58,10 @@ async def test_user_action_feedback_distinguishes_outcome(status, expected) -> N
     response = await service.handle(decoded())
 
     assert expected in response.content
+    if status in {RequestStatus.ACCEPTED, RequestStatus.DUPLICATE_CALLBACK}:
+        assert response.as_lark_payload()["card"]["elements"][1]["actions"][0][
+            "disabled"
+        ]
 
 
 @pytest.mark.asyncio

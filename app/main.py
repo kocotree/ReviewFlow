@@ -17,14 +17,19 @@ from lark_oapi.card.model import Card
 from lark_oapi.core.model import RawRequest, RawResponse
 from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
 
-from app.ai import AIClient
+from app.ai import AIClient, doubao_supports_file
 from app.background_tasks import BackgroundTaskSupervisor
 from app.card_action import CardActionService, DecodedCardAction
 from app.config import Config, get_config
+from app.content_collector import CollectionLimits, ContentCollector
+from app.docx_convert import soffice_available
 from app.feishu import FeishuClient
+from app.notification import NotificationManager
 from app.orchestrator import Orchestrator
 from app.record_coordinator import RecordCoordinator
-from app.task_registry import RecordKey, ScoreCommand, TaskRegistry
+from app.scavenger import ScoringScavenger
+from app.scoring_workflow import ScoringWorkflow
+from app.task_registry import RecordKey, TaskRegistry
 from app.workflow_state import TriggerSource
 
 logging.basicConfig(
@@ -94,9 +99,13 @@ class AppRuntime:
     event_handler: EventDispatcherHandler | None = None
     card_handler: CardActionHandler | None = None
     card_service: CardActionService | None = None
+    scavenger: ScoringScavenger | None = None
+    scavenger_stop: asyncio.Event | None = None
 
     async def shutdown(self) -> None:
         timeout = float(getattr(self.config, "shutdown_timeout_seconds", 30))
+        if self.scavenger_stop is not None:
+            self.scavenger_stop.set()
         self.supervisor.stop_accepting()
         self.registry.stop_accepting()
         await self.supervisor.drain(timeout)
@@ -104,29 +113,54 @@ class AppRuntime:
         try:
             await self.orchestrator.close()
         finally:
-            await self.ai.close()
+            try:
+                await self.feishu.close()
+            finally:
+                await self.ai.close()
 
 
 RuntimeFactory = Callable[[Config], AppRuntime]
 
 
 def build_default_runtime(config: Config) -> AppRuntime:
+    if not doubao_supports_file(config.ai_model):
+        raise ValueError(f"AI_MODEL 不具备 PDF/视觉文件能力: {config.ai_model}")
+    if not soffice_available():
+        raise RuntimeError("LibreOffice(soffice) 不可用，无法构建总 PDF")
     feishu = FeishuClient(config)
     ai = AIClient(config)
     registry = TaskRegistry()
     supervisor = BackgroundTaskSupervisor()
-    orchestrator = Orchestrator(config=config, feishu=feishu, ai=ai)
-
-    async def run_workflow(command: ScoreCommand) -> None:
-        key = command.key
-        await orchestrator.process_record(key.app_token, key.table_id, key.record_id)
+    notifier = NotificationManager(config, feishu)
+    collector = ContentCollector(
+        feishu=feishu,
+        supports_pdf_input=lambda: ai.supports_pdf_input,
+        limits=CollectionLimits(
+            max_attachment_count=config.max_attachment_count,
+            max_single_attachment_bytes=config.max_single_attachment_mb
+            * 1024
+            * 1024,
+            max_total_attachment_bytes=config.max_total_attachment_mb * 1024 * 1024,
+            max_pdf_pages=config.max_pdf_pages,
+            max_image_count=config.max_image_count,
+        ),
+    )
+    workflow = ScoringWorkflow(
+        config=config,
+        feishu=feishu,
+        ai=ai,
+        collector=collector,
+        notifier=notifier,
+        registry=registry,
+    )
+    orchestrator = Orchestrator(workflow=workflow, registry=registry)
 
     coordinator = RecordCoordinator(
         feishu=feishu,
         registry=registry,
-        runner=run_workflow,
+        runner=orchestrator.process_command,
     )
-    return AppRuntime(
+    runtime = AppRuntime(
         config=config,
         feishu=feishu,
         ai=ai,
@@ -136,6 +170,16 @@ def build_default_runtime(config: Config) -> AppRuntime:
         supervisor=supervisor,
         event_deduplicator=EventDeduplicator(),
     )
+    runtime.scavenger = ScoringScavenger(
+        feishu=feishu,
+        coordinator=coordinator,
+        registry=registry,
+        app_token=config.bitable_app_token,
+        table_id=config.bitable_table_id,
+        orphan_timeout_seconds=config.scoring_orphan_timeout_seconds,
+        interval_seconds=config.scavenger_interval_seconds,
+    )
+    return runtime
 
 
 def _enqueue_record_changes(data: Any, runtime: AppRuntime) -> None:
@@ -255,6 +299,12 @@ def create_app(
             coordinator=runtime.coordinator,
             admin_chat_id=config.notification_group_chat_id,
         )
+        if runtime.scavenger is not None:
+            runtime.scavenger_stop = asyncio.Event()
+            runtime.supervisor.spawn(
+                runtime.scavenger.run(runtime.scavenger_stop),
+                name="scoring-scavenger",
+            )
         app.state.runtime = runtime
         logger.info(
             "ReviewFlow 服务已启动, provider=%s model=%s threshold=%d",

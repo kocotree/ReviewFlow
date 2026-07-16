@@ -82,6 +82,34 @@ def test_create_app_does_not_read_configuration_at_import_time() -> None:
     assert not called
 
 
+def test_default_runtime_rejects_non_file_model_before_clients(monkeypatch, config) -> None:
+    import app.main as main_module
+
+    config.ai_model = "doubao-text-only"
+    monkeypatch.setattr(
+        main_module,
+        "FeishuClient",
+        lambda _: pytest.fail("能力校验应早于飞书客户端创建"),
+    )
+
+    with pytest.raises(ValueError, match="不具备 PDF"):
+        main_module.build_default_runtime(config)
+
+
+def test_default_runtime_rejects_missing_libreoffice(monkeypatch, config) -> None:
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "soffice_available", lambda: False)
+    monkeypatch.setattr(
+        main_module,
+        "FeishuClient",
+        lambda _: pytest.fail("自检应早于飞书客户端创建"),
+    )
+
+    with pytest.raises(RuntimeError, match="LibreOffice"):
+        main_module.build_default_runtime(config)
+
+
 @pytest.mark.asyncio
 async def test_record_event_is_deduplicated_and_delete_is_skipped(config) -> None:
     app_runtime = runtime(config)
@@ -116,6 +144,7 @@ async def test_shutdown_waits_for_admission_then_closes_clients(config) -> None:
 
     assert app_runtime.orchestrator.closed
     assert app_runtime.ai.closed
+    assert app_runtime.feishu.closed
 
 
 @pytest.mark.asyncio
@@ -212,6 +241,7 @@ async def test_shutdown_waits_for_running_score_before_closing(config) -> None:
     await shutdown
     assert app_runtime.orchestrator.closed
     assert app_runtime.ai.closed
+    assert app_runtime.feishu.closed
 
 
 def test_event_deduplicator_recovers_after_window(clock) -> None:

@@ -13,19 +13,24 @@ import json
 import logging
 from collections.abc import Callable
 from typing import Any, TypeVar
+from urllib.parse import urlsplit
 
 import httpx
 import lark_oapi as lark
 import requests
 from lark_oapi.api.bitable.v1 import (
     AppTableRecord,
+    Condition,
+    FilterInfo,
     GetAppTableRecordRequest,
+    SearchAppTableRecordRequest,
+    SearchAppTableRecordRequestBody,
     UpdateAppTableRecordRequest,
 )
-from lark_oapi.api.docx.v1 import RawContentDocumentRequest
 from lark_oapi.api.drive.v1 import (
     CreateExportTaskRequest,
     DownloadExportTaskRequest,
+    DownloadMediaRequest,
     ExportTask,
     GetExportTaskRequest,
 )
@@ -38,6 +43,7 @@ from lark_oapi.core.model import Config as LarkConfig
 from lark_oapi.core.token import TokenManager
 
 from app.config import Config
+from app.field_mapping import FIELD_SCORE_STATUS
 from app.errors import (
     FeishuAppConfigError,
     FeishuAppPermissionError,
@@ -274,6 +280,7 @@ class FeishuClient:
         tenant_token_provider: Callable[[], str] | None = None,
         sdk_concurrency: int = _DEFAULT_SDK_CONCURRENCY,
         export_concurrency: int = _DEFAULT_EXPORT_CONCURRENCY,
+        allowed_attachment_hosts: tuple[str, ...] | None = None,
         sdk_close_timeout: float = _DEFAULT_SDK_CLOSE_TIMEOUT,
     ) -> None:
         if sdk_concurrency < 1:
@@ -298,6 +305,14 @@ class FeishuClient:
         self._http = http_client or httpx.AsyncClient(timeout=30.0)
         self._sdk_slots = asyncio.Semaphore(sdk_concurrency)
         self._export_slots = asyncio.Semaphore(export_concurrency)
+        self._allowed_attachment_hosts = tuple(
+            host.lower()
+            for host in (
+                allowed_attachment_hosts
+                if allowed_attachment_hosts is not None
+                else config.attachment_allowed_hosts
+            )
+        )
         self._sdk_tasks: set[asyncio.Task[Any]] = set()
         self._sdk_close_timeout = sdk_close_timeout
         self._close_lock = asyncio.Lock()
@@ -490,32 +505,80 @@ class FeishuClient:
         self._checked_response(resp, operation="update_record", resource_id=record_id)
         return True
 
-    # ---- 飞书文档 ----
-
-    async def get_doc_raw_content(self, document_id: str) -> str:
-        """获取文档纯文本；访问或接口失败时抛出类型化异常。"""
-
-        req = RawContentDocumentRequest.builder().document_id(document_id).build()
-        resp = await self._sdk_call(
-            "get_doc_raw_content",
-            lambda: self._client.docx.v1.document.raw_content(req),
-            resource_id=document_id,
-            document_level=True,
+    async def list_scoring_records(
+        self,
+        *,
+        app_token: str = "",
+        table_id: str = "",
+    ) -> list[dict[str, Any]]:
+        """查询评分中记录及系统更新时间，供崩溃恢复清道夫使用。"""
+        app_token = app_token or self._config.bitable_app_token
+        table_id = table_id or self._config.bitable_table_id
+        condition = (
+            Condition.builder()
+            .field_name(FIELD_SCORE_STATUS)
+            .operator("is")
+            .value(["评分中"])
+            .build()
         )
-        self._checked_response(
-            resp,
-            operation="get_doc_raw_content",
-            resource_id=document_id,
-            document_level=True,
+        filter_info = (
+            FilterInfo.builder()
+            .conjunction("and")
+            .conditions([condition])
+            .build()
         )
-        data = getattr(resp, "data", None)
-        if data is None:
-            raise FeishuProtocolError(
-                "文档内容响应缺少 data",
-                operation="get_doc_raw_content",
-                resource_id=document_id,
+        body = (
+            SearchAppTableRecordRequestBody.builder()
+            .field_names([FIELD_SCORE_STATUS])
+            .filter(filter_info)
+            .automatic_fields(True)
+            .build()
+        )
+        page_token = ""
+        records: list[dict[str, Any]] = []
+        while True:
+            builder = (
+                SearchAppTableRecordRequest.builder()
+                .app_token(app_token)
+                .table_id(table_id)
+                .page_size(100)
+                .request_body(body)
             )
-        return str(getattr(data, "content", "") or "")
+            if page_token:
+                builder = builder.page_token(page_token)
+            request = builder.build()
+            response = await self._sdk_call(
+                "list_scoring_records",
+                lambda request=request: self._client.bitable.v1.app_table_record.search(
+                    request
+                ),
+            )
+            self._checked_response(response, operation="list_scoring_records")
+            data = getattr(response, "data", None)
+            for record in getattr(data, "items", None) or []:
+                record_id = str(getattr(record, "record_id", "") or "")
+                if not record_id:
+                    continue
+                records.append(
+                    {
+                        "record_id": record_id,
+                        "fields": dict(getattr(record, "fields", None) or {}),
+                        "last_modified_time": int(
+                            getattr(record, "last_modified_time", 0) or 0
+                        ),
+                    }
+                )
+            if not bool(getattr(data, "has_more", False)):
+                break
+            page_token = str(getattr(data, "page_token", "") or "")
+            if not page_token:
+                raise FeishuProtocolError(
+                    "分页响应标记 has_more 但缺少 page_token",
+                    operation="list_scoring_records",
+                )
+        return records
+
+    # ---- 飞书文档 ----
 
     async def get_wiki_node(self, node_token: str) -> tuple[str, str]:
         """解析 Wiki 节点，返回真实文档的 ``(obj_token, obj_type)``。"""
@@ -736,10 +799,52 @@ class FeishuClient:
 
     # ---- 附件下载 ----
 
-    async def download_attachment(self, url: str) -> bytes:
-        """使用复用的 HTTP client 下载附件；失败抛出类型化异常。"""
+    async def download_attachment(
+        self,
+        url: str = "",
+        *,
+        file_token: str = "",
+        max_bytes: int | None = None,
+    ) -> bytes:
+        """优先用 Drive Media SDK 下载；无 token 时才使用安全 URL 兜底。"""
 
         self._ensure_open()
+        if file_token:
+            request = DownloadMediaRequest.builder().file_token(file_token).build()
+            response = await self._sdk_call(
+                "download_attachment",
+                lambda: self._client.drive.v1.media.download(request),
+                resource_id=file_token,
+                document_level=True,
+            )
+            self._checked_response(
+                response,
+                operation="download_attachment",
+                resource_id=file_token,
+                document_level=True,
+            )
+            file = getattr(response, "file", None)
+            if file is None:
+                raise FeishuProtocolError(
+                    "附件下载响应缺少文件流",
+                    operation="download_attachment",
+                    resource_id=file_token,
+                )
+            data = await self._sdk_call(
+                "read_attachment_file",
+                file.read,
+                resource_id=file_token,
+                document_level=True,
+            )
+            if max_bytes is not None and len(data) > max_bytes:
+                raise FeishuMaterialError(
+                    "附件大小超过允许上限",
+                    operation="download_attachment",
+                    resource_id=file_token,
+                )
+            return data
+
+        host = self._validate_attachment_url(url)
         token = await self._sdk_call(
             "get_tenant_access_token", self._tenant_token_provider
         )
@@ -750,37 +855,78 @@ class FeishuClient:
             )
 
         try:
-            response = await self._http.get(
-                url, headers={"Authorization": f"Bearer {token}"}
-            )
+            async with self._http.stream(
+                "GET",
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+            ) as response:
+                if not response.is_success:
+                    body = (await response.aread()).decode("utf-8", "ignore")
+                    raise _typed_error(
+                        operation="download_attachment",
+                        message=body,
+                        status_code=response.status_code,
+                        resource_id=host,
+                        document_level=True,
+                    )
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if max_bytes is not None and total > max_bytes:
+                        raise FeishuMaterialError(
+                            "附件大小超过允许上限",
+                            operation="download_attachment",
+                            resource_id=host,
+                        )
+                    chunks.append(chunk)
+                return b"".join(chunks)
         except httpx.TimeoutException as exc:
             raise FeishuTimeoutError(
-                str(exc) or "附件下载超时",
+                "附件下载超时",
                 operation="download_attachment",
-                resource_id=url,
+                resource_id=host,
             ) from exc
         except httpx.InvalidURL as exc:
             raise FeishuMaterialError(
-                str(exc) or "附件下载地址无效",
+                "附件下载地址无效",
                 operation="download_attachment",
-                resource_id=url,
+                resource_id=host,
             ) from exc
         except httpx.TransportError as exc:
             raise FeishuTemporaryServiceError(
-                str(exc) or "附件下载网络不可达",
+                "附件下载网络不可达",
                 operation="download_attachment",
-                resource_id=url,
+                resource_id=host,
             ) from exc
 
-        if not response.is_success:
-            raise _typed_error(
+    def _validate_attachment_url(self, url: str) -> str:
+        try:
+            parsed = urlsplit(url)
+        except ValueError as exc:
+            raise FeishuMaterialError(
+                "附件下载地址无效",
                 operation="download_attachment",
-                message=response.text,
-                status_code=response.status_code,
-                resource_id=url,
-                document_level=True,
+            ) from exc
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme.lower() != "https" or not host:
+            raise FeishuMaterialError(
+                "附件下载地址必须使用 HTTPS",
+                operation="download_attachment",
+                resource_id=host or None,
             )
-        return response.content
+        allowed = any(
+            host == rule.lstrip("*.")
+            or (rule.startswith((".", "*.")) and host.endswith("." + rule.lstrip("*.")))
+            for rule in self._allowed_attachment_hosts
+        )
+        if not allowed:
+            raise FeishuMaterialError(
+                "附件下载域名不在允许列表",
+                operation="download_attachment",
+                resource_id=host,
+            )
+        return host
 
     async def close(self) -> None:
         """有界等待遗留 SDK 线程，并集中关闭复用 HTTP client。"""

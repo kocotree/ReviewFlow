@@ -40,6 +40,7 @@ def config() -> Config:
         score_threshold=70,
         max_revision_rounds=5,
         notification_group_chat_id="oc_admin",
+        attachment_allowed_hosts=("example.test", "open.feishu.cn"),
     )
 
 

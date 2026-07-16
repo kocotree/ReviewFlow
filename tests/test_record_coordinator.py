@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from app.field_mapping import FIELD_SCORE_STATUS
+from app.errors import FeishuNotFoundError
 from app.record_coordinator import (
     RecordCoordinator,
     RequestStatus,
@@ -192,4 +192,31 @@ async def test_initial_event_ignores_every_non_pending_status(status, record_fac
     )
 
     assert result.status is RequestStatus.NOT_TRIGGERABLE
+    assert registry.active_count == 0
+
+
+@pytest.mark.asyncio
+async def test_missing_record_exception_maps_to_not_found() -> None:
+    key = RecordKey("app", "table", "missing")
+    feishu = FakeFeishuClient()
+    feishu.outcomes.script(
+        "get_record",
+        FeishuNotFoundError(
+            "记录不存在",
+            operation="get_record",
+            resource_id="missing",
+        ),
+    )
+    registry = TaskRegistry()
+
+    async def runner(command):
+        raise AssertionError("不存在的记录不可入队")
+
+    coordinator = RecordCoordinator(feishu=feishu, registry=registry, runner=runner)
+    result = await coordinator.request_score(
+        key=key,
+        source=TriggerSource.INITIAL_EVENT,
+    )
+
+    assert result.status is RequestStatus.RECORD_NOT_FOUND
     assert registry.active_count == 0

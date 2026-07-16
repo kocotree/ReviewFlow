@@ -143,11 +143,17 @@ class FakeFeishuClient:
 
     async def download_attachment(
         self,
-        url: str,
+        url: str = "",
         *,
+        file_token: str = "",
         max_bytes: int | None = None,
     ) -> bytes:
-        self.trace.add("feishu.download_attachment", url=url, max_bytes=max_bytes)
+        self.trace.add(
+            "feishu.download_attachment",
+            url=url,
+            file_token=file_token,
+            max_bytes=max_bytes,
+        )
         return self.outcomes.next("download_attachment", b"%PDF-fake-attachment")
 
     async def send_card_message(
@@ -168,8 +174,17 @@ class FakeFeishuClient:
             self.cards.append(call)
         return success
 
-    async def list_scoring_records(self) -> list[dict[str, Any]]:
-        self.trace.add("feishu.list_scoring_records")
+    async def list_scoring_records(
+        self,
+        *,
+        app_token: str = "",
+        table_id: str = "",
+    ) -> list[dict[str, Any]]:
+        self.trace.add(
+            "feishu.list_scoring_records",
+            app_token=app_token,
+            table_id=table_id,
+        )
         return self.outcomes.next("list_scoring_records", [])
 
     async def close(self) -> None:
@@ -250,9 +265,9 @@ class FakeNotifier:
         self.trace = trace or CallTrace()
         self.notifications: list[tuple[str, dict[str, Any]]] = []
 
-    async def _record(self, kind: str, **payload: Any) -> bool:
-        self.trace.add(f"notify.{kind}", **payload)
-        self.notifications.append((kind, payload))
+    async def _record(self, notification_type: str, **payload: Any) -> bool:
+        self.trace.add(f"notify.{notification_type}", **payload)
+        self.notifications.append((notification_type, payload))
         return True
 
     async def notify_score_passed(self, **payload: Any) -> bool:

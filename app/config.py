@@ -11,6 +11,14 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 
+def _csv_env(name: str, default: str) -> tuple[str, ...]:
+    return tuple(
+        item.strip().lower()
+        for item in os.getenv(name, default).split(",")
+        if item.strip()
+    )
+
+
 @dataclass
 class Config:
     """应用配置。所有字段从环境变量读取，有明确默认值。"""
@@ -84,12 +92,6 @@ class Config:
     )
 
     # ---- 通知配置 ----
-    notification_cooldown_minutes: int = field(
-        default_factory=lambda: int(os.getenv("NOTIFICATION_COOLDOWN_MINUTES", "60"))
-    )
-    max_daily_notifications_per_user: int = field(
-        default_factory=lambda: int(os.getenv("MAX_DAILY_NOTIFICATIONS_PER_USER", "3"))
-    )
     # 异常/告警通知群的 chat_id（形如 oc_xxx）；为空则不向群推送。
     notification_group_chat_id: str = field(
         default_factory=lambda: os.getenv("NOTIFICATION_GROUP_CHAT_ID", "")
@@ -109,6 +111,40 @@ class Config:
     # ---- 后台任务 ----
     shutdown_timeout_seconds: float = field(
         default_factory=lambda: float(os.getenv("SHUTDOWN_TIMEOUT_SECONDS", "30"))
+    )
+    scavenger_interval_seconds: float = field(
+        default_factory=lambda: float(os.getenv("SCAVENGER_INTERVAL_SECONDS", "60"))
+    )
+    scoring_orphan_timeout_seconds: float = field(
+        default_factory=lambda: float(
+            os.getenv("SCORING_ORPHAN_TIMEOUT_SECONDS", "900")
+        )
+    )
+
+    # ---- 内容资源与下载安全 ----
+    max_attachment_count: int = field(
+        default_factory=lambda: int(os.getenv("MAX_ATTACHMENT_COUNT", "20"))
+    )
+    max_single_attachment_mb: int = field(
+        default_factory=lambda: int(os.getenv("MAX_SINGLE_ATTACHMENT_MB", "20"))
+    )
+    max_total_attachment_mb: int = field(
+        default_factory=lambda: int(os.getenv("MAX_TOTAL_ATTACHMENT_MB", "100"))
+    )
+    max_pdf_pages: int = field(
+        default_factory=lambda: int(os.getenv("MAX_PDF_PAGES", "300"))
+    )
+    max_image_count: int = field(
+        default_factory=lambda: int(os.getenv("MAX_IMAGE_COUNT", "20"))
+    )
+    doc_cache_max_chars: int = field(
+        default_factory=lambda: int(os.getenv("DOC_CACHE_MAX_CHARS", "5000"))
+    )
+    attachment_allowed_hosts: tuple[str, ...] = field(
+        default_factory=lambda: _csv_env(
+            "ATTACHMENT_ALLOWED_HOSTS",
+            ".feishu.cn,.larksuite.com,.larkoffice.com,open.feishu.cn",
+        )
     )
 
     # ---- 服务配置 ----
@@ -161,6 +197,24 @@ class Config:
             errors.append("SEND_CIRCUIT_BREAKER_MAX_MESSAGES 必须大于 0")
         if self.shutdown_timeout_seconds <= 0:
             errors.append("SHUTDOWN_TIMEOUT_SECONDS 必须大于 0")
+        if self.scavenger_interval_seconds <= 0:
+            errors.append("SCAVENGER_INTERVAL_SECONDS 必须大于 0")
+        if self.scoring_orphan_timeout_seconds <= 0:
+            errors.append("SCORING_ORPHAN_TIMEOUT_SECONDS 必须大于 0")
+        if self.max_attachment_count < 1:
+            errors.append("MAX_ATTACHMENT_COUNT 必须大于 0")
+        if self.max_single_attachment_mb < 1:
+            errors.append("MAX_SINGLE_ATTACHMENT_MB 必须大于 0")
+        if self.max_total_attachment_mb < self.max_single_attachment_mb:
+            errors.append("MAX_TOTAL_ATTACHMENT_MB 不得小于单附件上限")
+        if self.max_pdf_pages < 1:
+            errors.append("MAX_PDF_PAGES 必须大于 0")
+        if self.max_image_count < 1:
+            errors.append("MAX_IMAGE_COUNT 必须大于 0")
+        if self.doc_cache_max_chars < 1:
+            errors.append("DOC_CACHE_MAX_CHARS 必须大于 0")
+        if not self.attachment_allowed_hosts:
+            errors.append("ATTACHMENT_ALLOWED_HOSTS 至少配置一个允许域名")
         if not 1 <= self.port <= 65_535:
             errors.append("PORT 必须在 1 到 65535 之间")
         return errors
